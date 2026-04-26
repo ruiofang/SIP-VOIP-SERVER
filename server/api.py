@@ -313,9 +313,9 @@ async def friend_accept(fid: int, caller: _Caller = Depends(current_caller),
     return _friend_to_out(f, caller.username)
 
 
-@app.post("/api/friends/{fid}/reject", status_code=204)
+@app.post("/api/friends/{fid}/reject", status_code=204, response_model=None)
 async def friend_reject(fid: int, caller: _Caller = Depends(current_caller),
-                        db: AsyncSession = Depends(get_session)) -> None:
+                        db: AsyncSession = Depends(get_session)):
     f = await _get_friendship(db, fid)
     if not caller.is_admin and caller.username != f.to_user:
         raise HTTPException(403, "only recipient can reject")
@@ -323,9 +323,9 @@ async def friend_reject(fid: int, caller: _Caller = Depends(current_caller),
     await db.commit()
 
 
-@app.delete("/api/friends/{fid}", status_code=204)
+@app.delete("/api/friends/{fid}", status_code=204, response_model=None)
 async def friend_delete(fid: int, caller: _Caller = Depends(current_caller),
-                        db: AsyncSession = Depends(get_session)) -> None:
+                        db: AsyncSession = Depends(get_session)):
     f = await _get_friendship(db, fid)
     if not caller.is_admin and caller.username not in (f.from_user, f.to_user):
         raise HTTPException(403, "forbidden")

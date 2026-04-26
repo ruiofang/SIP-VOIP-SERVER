@@ -126,11 +126,19 @@ if [[ $EUID -ne 0 ]]; then
   echo "[!] systemd 模式需要 root, 请使用: sudo MODE=systemd bash $0"; exit 1
 fi
 
+# 选择运行用户:
+#   - 若 APP_DIR 在某个普通用户的 $HOME 下, 默认用该用户 (避免 /home/<user> 权限问题导致 status=200/CHDIR)
+#   - 否则使用 SERVICE_USER (默认 sipvoip 系统用户)
+if [[ -z "${SERVICE_USER_FORCED:-}" && "$APP_DIR" =~ ^/home/([^/]+)(/|$) ]]; then
+  SERVICE_USER="${BASH_REMATCH[1]}"
+  echo "[*] 检测到 APP_DIR 位于 /home/$SERVICE_USER, 使用该用户运行服务"
+fi
+
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
-chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/voice_storage" "$ENV_FILE" || true
-[[ -f "$APP_DIR/sip.db" ]] && chown "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/sip.db" || true
+SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR" || true
 
 UNIT=/etc/systemd/system/sip-voip-server.service
 cat > "$UNIT" <<EOF
@@ -142,7 +150,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$SERVICE_USER
-Group=$SERVICE_USER
+Group=$SERVICE_GROUP
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
 ExecStart=$VENV/bin/python -m server.main
