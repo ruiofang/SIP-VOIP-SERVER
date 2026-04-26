@@ -254,8 +254,12 @@ class RtpRelayManager:
                 (rtp_a_t, rtcp_a_t, port_a, _, rtp_a_p, rtcp_a_p) = await self._allocate_pair()
                 (rtp_b_t, rtcp_b_t, port_b, _, rtp_b_p, rtcp_b_p) = await self._allocate_pair()
 
-            leg_a = RelayLeg("A", port_a, port_a + 1, rtp_a_p, rtcp_a_p)
-            leg_b = RelayLeg("B", port_b, port_b + 1, rtp_b_p, rtcp_b_p)
+            leg_a = RelayLeg("A", port_a, port_a + 1)
+            leg_b = RelayLeg("B", port_b, port_b + 1)
+            leg_a.rtp_proto = rtp_a_p
+            leg_a.rtcp_proto = rtcp_a_p
+            leg_b.rtp_proto = rtp_b_p
+            leg_b.rtcp_proto = rtcp_b_p
             # 回填 leg 引用
             rtp_a_p.leg = leg_a
             rtcp_a_p.leg = leg_a
