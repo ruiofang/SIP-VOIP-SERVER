@@ -229,6 +229,20 @@ def _is_private_or_special_ip(host: str) -> bool:
     )
 
 
+def _is_unusable_local_ip(host: str) -> bool:
+    """判断是否不适合作为本机对外宣告地址。"""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    # 198.18.0.0/15 属于 RFC 2544 基准测试网段，常见于本机 TUN/VPN 虚拟地址。
+    benchmark = ipaddress.ip_network("198.18.0.0/15")
+    return bool(
+        ip.is_loopback or ip.is_link_local or ip.is_multicast
+        or ip.is_unspecified or ip.is_reserved or ip in benchmark
+    )
+
+
 def _pick_rtp_remote(sdp_host: str, sdp_port: int, sig_addr: Optional[Tuple[str, int]]) -> Tuple[str, int]:
     """优先使用 SDP 地址；若 SDP 给的是私网而信令来源是公网，则回退到信令来源 IP。"""
     if not sig_addr:
@@ -387,6 +401,29 @@ class SipUA:
                     self.local_ip = s.getsockname()[0]
             except Exception:
                 self.local_ip = "127.0.0.1"
+            if _is_unusable_local_ip(self.local_ip):
+                # 某些 VPN/TUN 环境下，按 server route 探测会拿到测试网段地址（如 198.18.x.x）。
+                # 再用公网地址做一次路由探测，尽量拿到真实出口网卡地址。
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s2:
+                        s2.connect(("1.1.1.1", 53))
+                        fallback_ip = s2.getsockname()[0]
+                    if not _is_unusable_local_ip(fallback_ip):
+                        log.warning(
+                            "本机地址探测得到 %s 可能不可用，回退为公网路由地址 %s",
+                            self.local_ip, fallback_ip,
+                        )
+                        self.local_ip = fallback_ip
+                    else:
+                        log.warning(
+                            "本机地址探测得到 %s 可能不可用；建议用 --local-ip 手动指定可达地址",
+                            self.local_ip,
+                        )
+                except Exception:
+                    log.warning(
+                        "本机地址探测得到 %s 可能不可用；建议用 --local-ip 手动指定可达地址",
+                        self.local_ip,
+                    )
         self.transport, _ = await loop.create_datagram_endpoint(
             lambda: _SipUdpProtocol(self._on_dgram),
             local_addr=("0.0.0.0", self.local_port),
