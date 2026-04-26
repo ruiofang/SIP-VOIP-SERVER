@@ -518,9 +518,9 @@ async def update_account(username: str, payload: AccountUpdate,
     return _account_to_out(acc, res.scalar_one_or_none())
 
 
-@app.delete("/api/accounts/{username}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/api/accounts/{username}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def delete_account(username: str, _: Admin = Depends(current_admin),
-                         db: AsyncSession = Depends(get_session)) -> None:
+                         db: AsyncSession = Depends(get_session)):
     acc = await _must_account(db, username)
     await db.delete(acc)
     await db.commit()
