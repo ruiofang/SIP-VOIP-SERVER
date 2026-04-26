@@ -36,14 +36,29 @@ _REPL_ACTIVE = False
 
 
 def _async_print(text: str) -> None:
-    """异步打印一段文本；若 REPL 处于交互模式，会清除当前提示行并在末尾重绘 ``sip> ``。"""
+    """异步打印一段文本；若 REPL 处于交互模式，会清除当前提示行并在末尾重绘 ``sip> ``，
+    同时把用户已经输入但尚未回车的 readline 缓冲区原样回显，避免输入丢失。"""
     line = text.rstrip("\n")
     if _REPL_ACTIVE:
-        # \r 回到行首, \033[K 清除到行尾, 输出文本, 再重绘提示符
-        sys.stdout.write("\r\033[K" + line + "\nsip> ")
+        buf = ""
+        try:
+            import readline
+            buf = readline.get_line_buffer()
+        except Exception:
+            pass
+        # \r 回到行首, \033[K 清除到行尾, 打印消息后再重绘提示符 + 用户已输入内容
+        sys.stdout.write("\r\033[K" + line + "\nsip> " + buf)
     else:
         sys.stdout.write(line + "\n")
     sys.stdout.flush()
+
+
+def _safe_write_history(path: str) -> None:
+    try:
+        import readline
+        readline.write_history_file(path)
+    except Exception:
+        pass
 
 
 # =====================================================================
@@ -1227,6 +1242,19 @@ async def repl(ua: SipUA, api: AdminAPI, user_api: UserAPI,
     global _REPL_ACTIVE
     if script_lines is None:
         _REPL_ACTIVE = True
+        # 启用 readline：支持方向键光标移动 / 历史 / Backspace 等行编辑
+        try:
+            import readline  # noqa: F401  (Linux/macOS 自带)
+            import atexit
+            hist_path = os.path.expanduser("~/.sip_client_history")
+            try:
+                readline.read_history_file(hist_path)
+            except (FileNotFoundError, OSError):
+                pass
+            readline.set_history_length(1000)
+            atexit.register(lambda: _safe_write_history(hist_path))
+        except ImportError:
+            pass
         # 异步读 stdin
         loop = asyncio.get_running_loop()
         def _read():
