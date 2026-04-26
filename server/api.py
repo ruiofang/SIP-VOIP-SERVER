@@ -632,10 +632,14 @@ def _account_to_out(acc: SipAccount, reg: Optional[Registration]) -> AccountOut:
     online = False
     contact = None
     expires_at = None
-    if reg and reg.expires_at and reg.expires_at > datetime.now(timezone.utc):
-        online = True
-        contact = reg.contact_uri
-        expires_at = reg.expires_at
+    if reg and reg.expires_at:
+        exp = reg.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp > datetime.now(timezone.utc):
+            online = True
+            contact = reg.contact_uri
+            expires_at = exp
     return AccountOut(
         id=acc.id,
         username=acc.username,
