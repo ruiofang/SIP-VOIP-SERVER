@@ -168,6 +168,21 @@ class RtpRelayManager:
         sp = sticky_port if sticky_port is not None else self.port_min
         self.sticky_port = sp if sp % 2 == 0 else sp + 1
 
+    @staticmethod
+    def _init_placeholder_leg(leg: RelayLeg, *, name: str, rtp_port: int, rtcp_port: int) -> None:
+        """Initialize a placeholder leg so early packets won't hit missing attributes."""
+        leg.name = name
+        leg.rtp_port = rtp_port
+        leg.rtcp_port = rtcp_port
+        leg.learned_rtp = None
+        leg.learned_rtcp = None
+        leg.peer_leg = None
+        leg.bytes_in = 0
+        leg.bytes_out = 0
+        leg.pkts_in = 0
+        leg.pkts_out = 0
+        leg.last_recv_ts = 0.0
+
     async def _allocate_pair(self) -> Tuple[asyncio.DatagramTransport, asyncio.DatagramTransport,
                                             int, int, _LegProtocol, _LegProtocol]:
         """分配相邻偶/奇端口对（RTP/RTCP）。"""
@@ -183,6 +198,9 @@ class RtpRelayManager:
             try:
                 # 临时占位 leg 引用，稍后回填
                 placeholder_leg = RelayLeg.__new__(RelayLeg)
+                self._init_placeholder_leg(
+                    placeholder_leg, name="P", rtp_port=port, rtcp_port=port + 1
+                )
                 rtp_proto = _LegProtocol(placeholder_leg, False)
                 rtcp_proto = _LegProtocol(placeholder_leg, True)
                 rtp_t, _ = await loop.create_datagram_endpoint(
@@ -204,6 +222,9 @@ class RtpRelayManager:
         """Allocate a fixed RTP/RTCP port pair."""
         loop = asyncio.get_event_loop()
         placeholder_leg = RelayLeg.__new__(RelayLeg)
+        self._init_placeholder_leg(
+            placeholder_leg, name="P", rtp_port=port, rtcp_port=port + 1
+        )
         rtp_proto = _LegProtocol(placeholder_leg, False)
         rtcp_proto = _LegProtocol(placeholder_leg, True)
         rtp_t, _ = await loop.create_datagram_endpoint(
