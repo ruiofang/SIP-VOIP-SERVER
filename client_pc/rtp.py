@@ -99,6 +99,8 @@ class RtpSession:
         self.bytes_recv = 0
         self.pkts_sent = 0
         self.pkts_recv = 0
+        self.last_rx_from: Optional[Tuple[str, int]] = None
+        self._logged_first_rx = False
 
     @property
     def actual_local_port(self) -> int:
@@ -121,7 +123,6 @@ class RtpSession:
     def _open_audio(self):
         try:
             import sounddevice as sd  # type: ignore
-            import numpy as np  # type: ignore
         except Exception as e:
             log.warning("sounddevice/numpy 不可用，禁用音频：%s", e)
             self.use_audio = False
@@ -156,10 +157,12 @@ class RtpSession:
             self._in_stream = sd.RawInputStream(
                 samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES,
                 channels=1, dtype="int16", callback=_mic_cb,
+                latency="high",
             )
             self._out_stream = sd.RawOutputStream(
-                samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES,
+                samplerate=SAMPLE_RATE, blocksize=0,
                 channels=1, dtype="int16", callback=_spk_cb,
+                latency="high",
             )
             self._in_stream.start()
             self._out_stream.start()
@@ -186,15 +189,22 @@ class RtpSession:
     def _on_packet(self, data: bytes, addr):
         # 学习对端地址（symmetric RTP）
         if self.remote is None or self.remote[0] in ("0.0.0.0", "127.0.0.1") or self.remote != addr:
-            # 仅当尚未设置或地址不同时学习；服务端中继可能用 0.0.0.0:port 作占位
-            if self.remote is None:
-                self.remote = addr
+            # 远端可能与 SDP 不一致（NAT/中继/对称 RTP），收到真实媒体包后立即切换。
+            if self.remote != addr:
+                log.info("RTP peer learned/updated: %s:%s -> %s:%s",
+                         self.remote[0], self.remote[1], addr[0], addr[1]) if self.remote else \
+                    log.info("RTP peer learned: %s:%s", addr[0], addr[1])
+            self.remote = addr
         parsed = _parse_rtp(data)
         if parsed is None:
             return
         pt, payload = parsed
         self.pkts_recv += 1
         self.bytes_recv += len(data)
+        self.last_rx_from = addr
+        if not self._logged_first_rx:
+            self._logged_first_rx = True
+            log.info("RTP first packet from %s:%s pt=%s bytes=%s", addr[0], addr[1], pt, len(payload))
         if not self.use_audio or self._out_stream is None:
             return
         try:

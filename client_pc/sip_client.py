@@ -1375,11 +1375,23 @@ async def repl(ua: SipUA, api: AdminAPI, user_api: UserAPI,
             elif cmd == "hangup":
                 await ua.hangup()
             elif cmd == "status":
+                active = ua.dialogs.get(ua.active_call) if ua.active_call else None
+                rtp = active.rtp if active else None
                 print(json.dumps({
                     "registered": ua.registered,
                     "local": f"{ua.local_ip}:{ua.actual_local_port}",
                     "active_call": ua.active_call,
                     "dialogs": list(ua.dialogs.keys()),
+                    "rtp": {
+                        "enabled": bool(rtp),
+                        "remote": f"{rtp.remote[0]}:{rtp.remote[1]}" if rtp and rtp.remote else None,
+                        "last_rx_from": f"{rtp.last_rx_from[0]}:{rtp.last_rx_from[1]}" if rtp and rtp.last_rx_from else None,
+                        "pkts_sent": rtp.pkts_sent if rtp else 0,
+                        "pkts_recv": rtp.pkts_recv if rtp else 0,
+                        "bytes_sent": rtp.bytes_sent if rtp else 0,
+                        "bytes_recv": rtp.bytes_recv if rtp else 0,
+                        "audio_enabled": rtp.use_audio if rtp else False,
+                    },
                 }, ensure_ascii=False, indent=2))
             elif cmd == "who":
                 print(json.dumps(api.list_accounts(), ensure_ascii=False, indent=2))
