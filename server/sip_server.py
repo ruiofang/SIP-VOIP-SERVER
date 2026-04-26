@@ -120,6 +120,7 @@ def parse_sip(data: bytes) -> Optional[SipMessage]:
 # ============== 字段解析 ==============
 
 _URI_USER_RE = re.compile(r"sip:([^@>;\s]+)@([^>;\s]+)", re.IGNORECASE)
+_CONTACT_HOST_RE = re.compile(r"^sips?:[^@]+@([^;>:]+)(?::(\d+))?", re.IGNORECASE)
 
 
 def extract_uri_user(value: str) -> Optional[str]:
@@ -170,6 +171,18 @@ def _pick_hint_remote(
     if _is_private_or_special_ip(sdp_host) and not _is_private_or_special_ip(sig_host):
         return (sig_host, sdp_port)
     return (sdp_host, sdp_port)
+
+
+def _normalize_contact_uri_for_nat(username: str, contact_uri: str, source: Address) -> str:
+    """For NAT clients, rewrite private/special Contact host to signaling source address."""
+    raw = (contact_uri or "").strip().strip("<>")
+    m = _CONTACT_HOST_RE.match(raw)
+    if not m:
+        return contact_uri
+    host = m.group(1)
+    if _is_private_or_special_ip(host) and not _is_private_or_special_ip(source[0]):
+        return f"sip:{username}@{source[0]}:{source[1]}"
+    return contact_uri
 
 
 def parse_via(value: str) -> Tuple[str, int, Dict[str, str]]:
@@ -550,7 +563,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 return
 
             contact = msg.header("contact") or ""
-            contact_uri = extract_uri(contact) or f"sip:{username}@{addr[0]}:{addr[1]}"
+            raw_contact_uri = extract_uri(contact) or f"sip:{username}@{addr[0]}:{addr[1]}"
+            contact_uri = _normalize_contact_uri_for_nat(username, raw_contact_uri, addr)
             expires_h = msg.header("expires")
             expires = int(expires_h) if expires_h and expires_h.isdigit() else 3600
             m = re.search(r"expires\s*=\s*(\d+)", contact, re.IGNORECASE)
