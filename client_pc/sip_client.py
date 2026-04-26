@@ -31,6 +31,21 @@ except ImportError:
 
 log = logging.getLogger("sipc")
 
+# 交互式 REPL 是否启用：异步打印时在末尾重绘 "sip> " 提示符
+_REPL_ACTIVE = False
+
+
+def _async_print(text: str) -> None:
+    """异步打印一段文本；若 REPL 处于交互模式，会清除当前提示行并在末尾重绘 ``sip> ``。"""
+    line = text.rstrip("\n")
+    if _REPL_ACTIVE:
+        # \r 回到行首, \033[K 清除到行尾, 输出文本, 再重绘提示符
+        sys.stdout.write("\r\033[K" + line + "\nsip> ")
+    else:
+        sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+
 # =====================================================================
 # SIP 报文
 # =====================================================================
@@ -430,7 +445,7 @@ class SipUA:
                 })
                 label = {"delivered": "已送达", "read": "已读",
                          "failed": "投递失败"}.get(str(status), str(status))
-                print(f"\n[STATUS msg #{mid} -> {target}] {label}\n", flush=True)
+                _async_print(f"[STATUS msg #{mid} -> {target}] {label}")
                 return
             # ---- 普通消息 ----
             text = msg.body.decode("utf-8", "replace") if "text" in ctl else f"<{len(msg.body)} bytes {ct}>"
@@ -438,7 +453,7 @@ class SipUA:
                                       "content_type": ct, "text": text,
                                       "raw": msg.body, "msg_id": srv_msg_id})
             tag = f" #{srv_msg_id}" if srv_msg_id else ""
-            print(f"\n[MSG{tag} from {from_user}] {text}\n", flush=True)
+            _async_print(f"[MSG{tag} from {from_user}] {text}")
             self._send(self._build_response(msg, 200, "OK"), addr)
             # 自动已读回执
             if srv_msg_id and self.auto_read and from_user:
@@ -829,7 +844,7 @@ class SipUA:
         # 180 Ringing
         self._send(self._build_response(msg, 180, "Ringing"), addr)
         frm = msg.header("From") or ""
-        print(f"\n[INCOMING CALL] from {frm}  -> 输入 answer / reject", flush=True)
+        _async_print(f"[INCOMING CALL] from {frm}  -> 输入 answer / reject")
         self.on_event("incoming_call", {"from": frm, "call_id": callid})
         if self.auto_answer:
             await asyncio.sleep(0.3)
@@ -1209,7 +1224,9 @@ HELP = """
 
 async def repl(ua: SipUA, api: AdminAPI, user_api: UserAPI,
                script_lines: Optional[List[str]] = None):
+    global _REPL_ACTIVE
     if script_lines is None:
+        _REPL_ACTIVE = True
         # 异步读 stdin
         loop = asyncio.get_running_loop()
         def _read():
