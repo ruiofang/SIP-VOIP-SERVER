@@ -659,7 +659,15 @@ def _account_to_out(acc: SipAccount, reg: Optional[Registration]) -> AccountOut:
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+    return {
+        "status": "ok",
+        "time": datetime.now(timezone.utc).isoformat(),
+        "public_host": settings.public_host,
+        "public_sip_port": settings.public_sip_port,
+        "rtp_port_min": settings.rtp_port_min,
+        "rtp_port_max": settings.rtp_port_max,
+        "sip_realm": settings.sip_realm,
+    }
 
 
 # ============== 实时通话 ==============

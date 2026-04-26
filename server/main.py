@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 
 import uvicorn
@@ -21,8 +22,31 @@ def _setup_logging() -> None:
     )
 
 
+def _warn_public_host() -> None:
+    log = logging.getLogger("boot")
+    log.info(
+        "PUBLIC_HOST=%s SIP=%s/%s API=%s RTP=%s-%s",
+        settings.public_host,
+        settings.sip_host,
+        settings.sip_port,
+        settings.api_port,
+        settings.rtp_port_min,
+        settings.rtp_port_max,
+    )
+    try:
+        ip = ipaddress.ip_address(settings.public_host)
+    except ValueError:
+        return
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+        log.warning(
+            "PUBLIC_HOST=%s 不是公网可达地址；SIP/SDP 将向客户端宣告这个地址，公网终端通常无法回送媒体。",
+            settings.public_host,
+        )
+
+
 async def _main() -> None:
     _setup_logging()
+    _warn_public_host()
     transport, protocol = await start_sip_server()
     runtime.sip_protocol = protocol
     config = uvicorn.Config(
