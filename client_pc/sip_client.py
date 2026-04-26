@@ -1563,12 +1563,36 @@ async def amain(args):
 
 def main():
     args = parse_args()
+    # 保存终端 tty 设置，退出时恢复，避免 Ctrl+C 后终端 "失灵" (无回显/无换行)
+    _saved_tc = None
+    try:
+        import termios
+        if sys.stdin.isatty():
+            _saved_tc = termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        _saved_tc = None
+
+    def _restore_tty():
+        try:
+            if _saved_tc is not None:
+                import termios
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _saved_tc)
+            else:
+                # 兜底: 调 stty sane 恢复终端
+                if sys.stdin.isatty():
+                    os.system("stty sane 2>/dev/null")
+        except Exception:
+            pass
+
     try:
         asyncio.run(amain(args))
     except KeyboardInterrupt:
         pass
     finally:
+        _restore_tty()
         # daemon 的 stdin 读线程可能仍阻塞在 input()，强制退出避免 atexit join 卡死
+        sys.stdout.flush()
+        sys.stderr.flush()
         os._exit(0)
 
 
