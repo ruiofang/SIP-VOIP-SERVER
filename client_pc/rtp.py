@@ -251,6 +251,8 @@ class RtpSession:
             self._send_task.cancel()
             try:
                 await self._send_task
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
         if self._in_stream is not None:
