@@ -42,6 +42,17 @@ def md5_hex(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()
 
 
+_URI_USER_RE = re.compile(r"sip:([^@>;\s]+)@", re.IGNORECASE)
+
+
+def _extract_uri_user(value: str) -> Optional[str]:
+    """从 From / To 头里提取 sip:user@host 中的 user。"""
+    if not value:
+        return None
+    m = _URI_USER_RE.search(value)
+    return m.group(1) if m else None
+
+
 @dataclass
 class SipMessage:
     is_request: bool
@@ -254,7 +265,8 @@ class SipUA:
     def __init__(self, *, server_host: str, server_port: int, user: str, password: str,
                  realm: str, local_port: int = 0, rtp_port: int = 0,
                  codec: str = "pcmu", use_audio: bool = True,
-                 auto_answer: bool = False, on_event=None):
+                 auto_answer: bool = False, auto_read: bool = True,
+                 on_event=None):
         self.server_host = server_host
         self.server_port = server_port
         self.user = user
@@ -265,6 +277,7 @@ class SipUA:
         self.codec = codec
         self.use_audio = use_audio
         self.auto_answer = auto_answer
+        self.auto_read = auto_read
         self.on_event = on_event or (lambda *a, **kw: None)
 
         self.transport: Optional[asyncio.DatagramTransport] = None
@@ -390,11 +403,38 @@ class SipUA:
             self._send(self._build_response(msg, 200, "OK"), addr)
         elif method == "MESSAGE":
             ct = msg.header("Content-Type") or "text/plain"
-            text = msg.body.decode("utf-8", "replace") if "text" in ct else f"<{len(msg.body)} bytes {ct}>"
+            ctl = ct.lower()
             frm = msg.header("From") or ""
-            self.on_event("message", {"from": frm, "content_type": ct, "text": text, "raw": msg.body})
-            print(f"\n[MSG  from {frm}] {text}\n", flush=True)
+            from_user = _extract_uri_user(frm) or frm
+            srv_msg_id = msg.header("X-Message-ID")
+            # ---- 状态回执（服务端推送的“已送达 / 已读”） ----
+            if "application/x-message-status" in ctl:
+                self._send(self._build_response(msg, 200, "OK"), addr)
+                try:
+                    payload = json.loads(msg.body.decode("utf-8", "replace"))
+                except Exception:
+                    payload = {}
+                mid = payload.get("msg_id")
+                status = payload.get("status")
+                target = payload.get("to") or from_user
+                self.on_event("message_status", {
+                    "msg_id": mid, "status": status, "to": target,
+                })
+                label = {"delivered": "已送达", "read": "已读",
+                         "failed": "投递失败"}.get(str(status), str(status))
+                print(f"\n[STATUS msg #{mid} -> {target}] {label}\n", flush=True)
+                return
+            # ---- 普通消息 ----
+            text = msg.body.decode("utf-8", "replace") if "text" in ctl else f"<{len(msg.body)} bytes {ct}>"
+            self.on_event("message", {"from": frm, "from_user": from_user,
+                                      "content_type": ct, "text": text,
+                                      "raw": msg.body, "msg_id": srv_msg_id})
+            tag = f" #{srv_msg_id}" if srv_msg_id else ""
+            print(f"\n[MSG{tag} from {from_user}] {text}\n", flush=True)
             self._send(self._build_response(msg, 200, "OK"), addr)
+            # 自动已读回执
+            if srv_msg_id and self.auto_read and from_user:
+                asyncio.create_task(self._send_read_receipt(from_user, srv_msg_id))
         elif method == "INVITE":
             await self._on_incoming_invite(msg, addr)
         elif method == "ACK":
@@ -509,7 +549,9 @@ class SipUA:
 
     # ====================== MESSAGE ======================
     async def send_message(self, to_user: str, text: str,
-                           content_type: str = "text/plain;charset=UTF-8") -> bool:
+                           content_type: str = "text/plain;charset=UTF-8"
+                           ) -> Tuple[bool, Optional[str]]:
+        """发送 SIP MESSAGE。返回 (是否 2xx, 服务端分配的 X-Message-ID)。"""
         nc = 0
         last_chal = None
         body = text.encode("utf-8")
@@ -542,13 +584,35 @@ class SipUA:
             req.body = body
             resp = await self._tx_send(req, branch)
             if resp is None:
-                return False
+                return False, None
             if resp.status_code in (401, 407):
                 hdr = resp.header("WWW-Authenticate") or resp.header("Proxy-Authenticate") or ""
                 last_chal = parse_digest_challenge(hdr)
                 continue
-            return 200 <= resp.status_code < 300
-        return False
+            ok = 200 <= resp.status_code < 300
+            mid = resp.header("X-Message-ID") if ok else None
+            return ok, mid
+        return False, None
+
+    async def _send_read_receipt(self, to_user: str, msg_id: str) -> None:
+        """收到服务端推送的消息后，自动回送 read 回执。"""
+        try:
+            payload = json.dumps({"msg_id": int(msg_id), "status": "read"})
+        except Exception:
+            return
+        try:
+            await self.send_message(to_user, payload,
+                                    content_type="application/x-message-status+json")
+        except Exception as e:
+            log.debug("send read receipt failed: %s", e)
+
+    async def mark_read(self, to_user: str, msg_id: str) -> bool:
+        """显式发送 read 回执（REPL `read <to_user> <msg_id>`）。"""
+        ok, _ = await self.send_message(
+            to_user, json.dumps({"msg_id": int(msg_id), "status": "read"}),
+            content_type="application/x-message-status+json",
+        )
+        return ok
 
     async def options_ping(self) -> Optional[int]:
         cseq = self._next_cseq("OPTIONS")
@@ -1096,6 +1160,7 @@ HELP = """
   unregister          注销
   options             OPTIONS ping
   msg <user> <text..> 发送文本短信
+  read <user> <msgid> 手动给某条消息发送已读回执
   call <user>         拨打
   answer              接听来电
   reject              拒接来电
@@ -1176,7 +1241,13 @@ async def repl(ua: SipUA, api: AdminAPI, user_api: UserAPI,
                 code = await ua.options_ping()
                 print(f"OPTIONS -> {code}")
             elif cmd == "msg" and len(args) >= 2:
-                ok = await ua.send_message(args[0], " ".join(args[1:]))
+                ok, mid = await ua.send_message(args[0], " ".join(args[1:]))
+                if ok:
+                    print(f"OK msgid={mid}" if mid else "OK")
+                else:
+                    print("FAIL")
+            elif cmd == "read" and len(args) == 2:
+                ok = await ua.mark_read(args[0], args[1])
                 print("OK" if ok else "FAIL")
             elif cmd == "call" and len(args) == 1:
                 await ua.call(args[0])
@@ -1273,6 +1344,8 @@ def parse_args():
     ap.add_argument("--codec", default="pcmu", choices=["pcmu", "pcma"])
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--auto-answer", action="store_true")
+    ap.add_argument("--no-auto-read", action="store_true",
+                    help="收到消息后不自动发送已读回执")
     ap.add_argument("--api-base", default="")
     ap.add_argument("--admin-user", default="")
     ap.add_argument("--admin-password", default="")
@@ -1294,6 +1367,7 @@ async def amain(args):
         local_port=args.local_port, rtp_port=args.rtp_port,
         codec=args.codec, use_audio=not args.no_audio,
         auto_answer=args.auto_answer,
+        auto_read=not args.no_auto_read,
     )
     api = AdminAPI(args.api_base, args.admin_user, args.admin_password)
     user_api = UserAPI(args.api_base, args.user, args.password)

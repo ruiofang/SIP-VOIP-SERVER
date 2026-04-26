@@ -6,6 +6,8 @@
 
 - ✅ SIP REGISTER（带 MD5 Digest 鉴权，自动定时刷新）
 - ✅ 发送 SIP MESSAGE（文本短信）/ 接收 MESSAGE 并自动回 200
+- ✅ **可靠投递**：发送方收到服务端 `X-Message-ID`，并在对端收到 / 已读
+  时收到状态推送（`[STATUS msg #N -> 1002] 已送达 / 已读`）
 - ✅ SIP OPTIONS 保活
 - ✅ **拨打 / 接听语音通话**（INVITE / 100 Trying / 180 Ringing / 200 OK / ACK / BYE / CANCEL）
 - ✅ RTP 音频收发（G.711 PCMU/PCMA 编解码，麦克风→对端，对端→扬声器）
@@ -59,7 +61,8 @@ python sip_client.py \
 ```
 sip> register             # 注册（启动后会自动注册一次）
 sip> who                  # 列出所有账号 + 在线状态（走 REST API）
-sip> msg 1002 你好         # 发文本短信
+sip> msg 1002 你好         # 发文本短信，返回 OK msgid=N
+sip> read 1002 N          # 手动给 1002 的消息 #N 发已读回执（默认已自动）
 sip> call 1002            # 拨打
 sip> hangup               # 挂断当前呼叫
 sip> answer               # 接听来电
@@ -102,6 +105,7 @@ sip> scan-uri sipfriend://realm/user?token=xxxx
 | `--api-base` | 管理后台 URL（用于 REST 测试） | 空=不启用 |
 | `--admin-user` / `--admin-password` | 管理员凭据 | 空 |
 | `--auto-answer` | 自动接听来电（适合做被叫机器） | 关闭 |
+| `--no-auto-read` | 收到消息后**不**自动回送已读回执（默认自动） | 关闭 |
 | `--script` | 从文件按行执行命令后退出 | 空 |
 
 ## 脚本化测试

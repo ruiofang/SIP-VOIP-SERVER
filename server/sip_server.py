@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import secrets
@@ -281,6 +282,31 @@ class OnlineRecord:
     user_agent: str = ""
 
 
+# 状态回执的 Content-Type；客户端读完一条消息后会通过 SIP MESSAGE 把
+# {"msg_id": N, "status": "read"} 发给服务端，服务端识别后更新数据库并
+# 推送给原发送方。
+STATUS_CT = "application/x-message-status+json"
+
+# 投递参数
+DELIVERY_RETRY_INTERVAL = 4.0   # 单次重试间隔（秒）
+DELIVERY_MAX_ATTEMPTS = 5       # 最大重试次数
+DELIVERY_TX_TIMEOUT = 8.0       # 等待对端 200 OK 的时长
+
+
+@dataclass
+class OutboundMsg:
+    """已发往客户端、正在等待 200 OK 的 MESSAGE 事务。"""
+
+    msg_id: int
+    branch: str
+    from_user: str
+    to_user: str
+    target: Address
+    sent_at: float
+    attempts: int = 1
+    is_status: bool = False  # 状态回执（不需要再 ack/重发）
+
+
 # ============== B2BUA 事务/对话 ==============
 
 @dataclass
@@ -315,6 +341,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.online: Dict[str, OnlineRecord] = {}
         self.transactions: Dict[str, Transaction] = {}
         self.dialogs: Dict[str, Dialog] = {}
+        # 等待对端 200 OK 的服务端发起 MESSAGE 事务（投递跟踪）
+        self.pending_outbound: Dict[str, OutboundMsg] = {}
         self.relay = RtpRelayManager(
             host=settings.sip_host,
             public_host=settings.public_host,
@@ -322,12 +350,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             port_max=settings.rtp_port_max,
         )
         self._gc_task: Optional[asyncio.Task] = None
+        self._retry_task: Optional[asyncio.Task] = None
 
     # ---------- asyncio ----------
     def connection_made(self, transport: asyncio.BaseTransport) -> None:  # type: ignore[override]
         self.transport = transport  # type: ignore[assignment]
         logger.info("SIP server listening on %s:%s", settings.sip_host, settings.sip_port)
         self._gc_task = asyncio.get_event_loop().create_task(self._gc_loop())
+        self._retry_task = asyncio.get_event_loop().create_task(self._retry_loop())
 
     def datagram_received(self, data: bytes, addr) -> None:  # type: ignore[override]
         asyncio.create_task(self._handle(data, addr))
@@ -396,6 +426,20 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return
         _, _, params = parse_via(top_via)
         branch = params.get("branch", "")
+
+        # 服务端主动发出的 MESSAGE 投递事务 —— 收到 2xx 表示对端签收
+        out = self.pending_outbound.get(branch)
+        if out is not None:
+            self.pending_outbound.pop(branch, None)
+            if msg.status_code and 200 <= msg.status_code < 300:
+                if not out.is_status:
+                    await self._mark_delivered(out)
+            else:
+                logger.info("outbound MESSAGE failed: msg_id=%s status=%s",
+                            out.msg_id, msg.status_code)
+                # 失败暂不立即重试，由 _retry_loop 周期性扫描
+            return
+
         tx = self.transactions.get(branch)
         if not tx:
             logger.debug("orphan response, branch=%s", branch)
@@ -527,17 +571,28 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
         ctype = msg.header("content-type") or "text/plain"
         body_text = msg.body.decode("utf-8", errors="replace")
+
+        # ---- 状态回执：客户端读完后发回 ----
+        if STATUS_CT in ctype.lower():
+            self.send(build_response(msg, 200, "OK"), addr)
+            await self._handle_status_receipt(from_user, body_text)
+            return
+
         is_voice = "application/x-voice-url" in ctype.lower() or body_text.startswith("voice://")
         msg_type = "voice" if is_voice else "text"
 
-        self.send(build_response(msg, 200, "OK"), addr)
-
         async with session_scope() as db:
             row = Message(from_user=from_user, to_user=to_user,
-                          msg_type=msg_type, body=body_text, delivered=False)
+                          msg_type=msg_type, body=body_text,
+                          delivered=False, status="pending", attempts=0)
             db.add(row)
             await db.flush()
             row_id = row.id
+
+        # 200 OK + X-Message-ID 让发送方记录服务端 ID，后续状态推送可关联
+        self.send(build_response(msg, 200, "OK", extra_headers={
+            "X-Message-ID": str(row_id),
+        }), addr)
 
         await self._try_deliver(row_id, from_user, to_user, body_text, ctype)
 
@@ -545,17 +600,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                            content_type: str) -> None:
         rec = self.online.get(to_user)
         if not rec:
-            logger.info("offline message stored: %s -> %s", from_user, to_user)
+            logger.info("offline message stored: %s -> %s (id=%s)",
+                        from_user, to_user, msg_id)
             return
-        await self._send_message_to(rec, from_user, to_user, body, content_type)
-        async with session_scope() as db:
-            obj = await db.get(Message, msg_id)
-            if obj:
-                obj.delivered = True
-                obj.delivered_at = datetime.now(timezone.utc)
+        await self._dispatch_message(msg_id, rec, from_user, to_user, body, content_type)
 
-    async def _send_message_to(self, rec: OnlineRecord, from_user: str, to_user: str,
-                               body: str, content_type: str) -> None:
+    async def _dispatch_message(self, msg_id: int, rec: OnlineRecord,
+                                from_user: str, to_user: str,
+                                body: str, content_type: str) -> None:
+        """构造 SIP MESSAGE 发给在线客户端，并跟踪 200 OK。"""
         body_b = body.encode("utf-8")
         call_id = secrets.token_hex(12)
         branch = "z9hG4bK" + secrets.token_hex(6)
@@ -570,29 +623,182 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             f"Call-ID: {call_id}",
             "CSeq: 1 MESSAGE",
             f"Content-Type: {content_type}",
+            f"X-Message-ID: {msg_id}",
             f"Content-Length: {len(body_b)}",
         ]
         pkt = (CRLF.join(lines) + CRLF2).encode("utf-8") + body_b
         self.send(pkt, rec.source)
+        async with session_scope() as db:
+            obj = await db.get(Message, msg_id)
+            if obj:
+                obj.attempts = (obj.attempts or 0) + 1
+                obj.last_attempt_at = datetime.now(timezone.utc)
+                attempts = obj.attempts
+            else:
+                attempts = 1
+        self.pending_outbound[branch] = OutboundMsg(
+            msg_id=msg_id, branch=branch, from_user=from_user, to_user=to_user,
+            target=rec.source, sent_at=time.time(), attempts=attempts,
+        )
+
+    async def _mark_delivered(self, out: OutboundMsg) -> None:
+        async with session_scope() as db:
+            obj = await db.get(Message, out.msg_id)
+            if not obj:
+                return
+            if obj.status == "read":  # 已读保留
+                return
+            obj.status = "delivered"
+            obj.delivered = True
+            obj.delivered_at = datetime.now(timezone.utc)
+        logger.info("MESSAGE delivered: id=%s %s -> %s",
+                    out.msg_id, out.from_user, out.to_user)
+        await self._notify_status_to_sender(out.msg_id, out.from_user,
+                                            out.to_user, "delivered")
+
+    async def _handle_status_receipt(self, from_user: str, body: str) -> None:
+        """客户端发回的已读回执：{"msg_id": N, "status": "read"}"""
+        try:
+            data = json.loads(body)
+            msg_id = int(data.get("msg_id"))
+            status = str(data.get("status") or "read")
+        except Exception:
+            logger.warning("invalid status receipt from %s: %r", from_user, body[:200])
+            return
+        if status not in ("read", "delivered"):
+            return
+
+        async with session_scope() as db:
+            obj = await db.get(Message, msg_id)
+            if not obj:
+                return
+            # 仅允许接收方对该消息发回执
+            if obj.to_user != from_user:
+                logger.warning("status receipt user mismatch: msg_id=%s "
+                               "to_user=%s receipt_from=%s",
+                               msg_id, obj.to_user, from_user)
+                return
+            if status == "read":
+                obj.status = "read"
+                obj.read_at = datetime.now(timezone.utc)
+                if not obj.delivered:
+                    obj.delivered = True
+                    obj.delivered_at = obj.read_at
+            elif status == "delivered" and obj.status == "pending":
+                obj.status = "delivered"
+                obj.delivered = True
+                obj.delivered_at = datetime.now(timezone.utc)
+            sender = obj.from_user
+            recipient = obj.to_user
+
+        logger.info("MESSAGE %s: id=%s %s -> %s", status, msg_id, sender, recipient)
+        await self._notify_status_to_sender(msg_id, sender, recipient, status)
+
+    async def _notify_status_to_sender(self, msg_id: int, sender: str,
+                                       recipient: str, status: str) -> None:
+        rec = self.online.get(sender)
+        if not rec:
+            return
+        payload = json.dumps({"msg_id": msg_id, "status": status,
+                              "to": recipient}, ensure_ascii=False)
+        body_b = payload.encode("utf-8")
+        call_id = secrets.token_hex(12)
+        branch = "z9hG4bK" + secrets.token_hex(6)
+        from_tag = secrets.token_hex(6)
+        host, port = settings.public_host, settings.public_sip_port
+        lines = [
+            f"MESSAGE {rec.contact_uri} SIP/2.0",
+            f"Via: SIP/2.0/UDP {host}:{port};branch={branch};rport",
+            "Max-Forwards: 70",
+            f"From: <sip:{recipient}@{settings.sip_realm}>;tag={from_tag}",
+            f"To: <sip:{sender}@{settings.sip_realm}>",
+            f"Call-ID: {call_id}",
+            "CSeq: 1 MESSAGE",
+            f"Content-Type: {STATUS_CT}",
+            f"Content-Length: {len(body_b)}",
+        ]
+        pkt = (CRLF.join(lines) + CRLF2).encode("utf-8") + body_b
+        self.send(pkt, rec.source)
+        # 状态回执自身不要求重传
+        self.pending_outbound[branch] = OutboundMsg(
+            msg_id=msg_id, branch=branch, from_user=recipient, to_user=sender,
+            target=rec.source, sent_at=time.time(), attempts=1, is_status=True,
+        )
 
     async def _deliver_offline(self, username: str) -> None:
         async with session_scope() as db:
             res = await db.execute(
                 select(Message).where(
                     Message.to_user == username,
-                    Message.delivered == False,  # noqa
+                    Message.status.in_(("pending",)),
                 ).order_by(Message.created_at)
             )
             rows = list(res.scalars())
-            rec = self.online.get(username)
-            if not rec:
-                return
-            for r in rows:
-                ctype = ("application/x-voice-url" if r.msg_type == "voice"
-                         else "text/plain;charset=utf-8")
-                await self._send_message_to(rec, r.from_user, r.to_user, r.body, ctype)
-                r.delivered = True
-                r.delivered_at = datetime.now(timezone.utc)
+        rec = self.online.get(username)
+        if not rec:
+            return
+        for r in rows:
+            ctype = ("application/x-voice-url" if r.msg_type == "voice"
+                     else "text/plain;charset=utf-8")
+            await self._dispatch_message(r.id, rec, r.from_user, r.to_user,
+                                         r.body, ctype)
+
+    async def _retry_loop(self) -> None:
+        """周期性扫描 pending 消息，处理超时未确认 / 重试投递。"""
+        while True:
+            try:
+                await asyncio.sleep(DELIVERY_RETRY_INTERVAL)
+                now = time.time()
+
+                # 1. 处理超时的 pending_outbound（对端 200 OK 没回）
+                stale = [b for b, o in self.pending_outbound.items()
+                         if now - o.sent_at > DELIVERY_TX_TIMEOUT]
+                for b in stale:
+                    o = self.pending_outbound.pop(b, None)
+                    if o and not o.is_status:
+                        logger.info("outbound MESSAGE timeout: id=%s attempts=%d",
+                                    o.msg_id, o.attempts)
+
+                # 2. 扫描 DB 中仍 pending 的消息，对在线对端重试
+                async with session_scope() as db:
+                    res = await db.execute(
+                        select(Message).where(Message.status == "pending")
+                        .order_by(Message.created_at).limit(200)
+                    )
+                    rows = list(res.scalars())
+
+                in_flight_ids = {o.msg_id for o in self.pending_outbound.values()
+                                 if not o.is_status}
+                for r in rows:
+                    if r.id in in_flight_ids:
+                        continue
+                    rec = self.online.get(r.to_user)
+                    if not rec:
+                        continue
+                    if (r.attempts or 0) >= DELIVERY_MAX_ATTEMPTS:
+                        async with session_scope() as db:
+                            obj = await db.get(Message, r.id)
+                            if obj and obj.status == "pending":
+                                obj.status = "failed"
+                        logger.warning("MESSAGE failed after %d attempts: id=%s",
+                                       r.attempts, r.id)
+                        continue
+                    # 节流：若上次尝试不久前，跳过
+                    last = r.last_attempt_at
+                    if last is not None:
+                        if last.tzinfo is None:
+                            last = last.replace(tzinfo=timezone.utc)
+                        if (datetime.now(timezone.utc) - last).total_seconds() \
+                                < DELIVERY_RETRY_INTERVAL:
+                            continue
+                    ctype = ("application/x-voice-url" if r.msg_type == "voice"
+                             else "text/plain;charset=utf-8")
+                    await self._dispatch_message(r.id, rec, r.from_user,
+                                                 r.to_user, r.body, ctype)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("retry loop error")
 
     # ============== INVITE ==============
     async def _handle_invite(self, msg: SipMessage, addr: Address) -> None:

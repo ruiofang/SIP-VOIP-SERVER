@@ -74,7 +74,14 @@ class Registration(Base):
 
 
 class Message(Base):
-    """消息历史（SIP MESSAGE / 语音消息）。"""
+    """消息历史（SIP MESSAGE / 语音消息）。
+
+    生产-消费模型保证投递可靠：
+      - status: pending(已接收待投递) / delivered(对端已签收 200 OK) /
+                read(对端已读) / failed(超过最大重试)
+      - delivered/delivered_at 保留兼容字段，与 status 同步
+      - attempts/last_attempt_at 用于重试调度
+    """
 
     __tablename__ = "messages"
 
@@ -84,10 +91,16 @@ class Message(Base):
     msg_type: Mapped[str] = mapped_column(String(16), nullable=False)  # text / voice
     body: Mapped[str] = mapped_column(Text, nullable=False)            # 文本内容或语音 URL
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
 class VoiceFile(Base):

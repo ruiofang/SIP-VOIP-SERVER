@@ -268,8 +268,19 @@
                       </template>
                     </td>
                     <td class="px-4 py-2">
-                      <span :class="m.delivered ? 'text-green-600' : 'text-yellow-600'"
-                            x-text="m.delivered ? '✓' : '…待送达'"></span>
+                      <span :class="{
+                              'text-blue-600': m.status === 'read',
+                              'text-green-600': m.status === 'delivered',
+                              'text-red-600': m.status === 'failed',
+                              'text-yellow-600': !['read','delivered','failed'].includes(m.status),
+                            }"
+                            x-text="({
+                              pending: '…待投递',
+                              delivered: '✓ 已送达',
+                              read: '✓✓ 已读',
+                              failed: '✗ 失败',
+                            }[m.status] || (m.delivered ? '✓ 已送达' : '…待投递'))
+                              + (m.attempts ? ' (' + m.attempts + ')' : '')"></span>
                     </td>
                   </tr>
                 </template>

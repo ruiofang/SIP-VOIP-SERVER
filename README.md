@@ -6,6 +6,9 @@
 
 - ✅ SIP REGISTER（RFC 3261，带 MD5 Digest 鉴权）
 - ✅ SIP MESSAGE（RFC 3428，文本短信，支持离线存储）
+- ✅ **可靠消息投递**：生产-消费模型，支持发送方追踪 `已送达 / 已读 / 失败`
+  状态（`X-Message-ID` + `application/x-message-status+json` 回执），离线消息
+  在对端上线后自动重投，未确认者按指数退避重试至上限再标记 `failed`
 - ✅ **实时通话（B2BUA + RTP 媒体中继）**：INVITE / ACK / BYE / CANCEL / re-INVITE，
   自动 SDP 改写，UDP 端口对中继 RTP+RTCP，symmetric RTP 学习对端地址（NAT 友好）
 - ✅ SIP OPTIONS（保活）
