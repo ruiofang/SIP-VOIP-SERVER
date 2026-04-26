@@ -66,3 +66,12 @@ python main.py
 ## ESP32-S3 接入
 
 见 [client_esp32/README.md](client_esp32/README.md)
+
+## 作者
+
+RUIO
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源发布，详见 [LICENSE](LICENSE) 文件。
+
