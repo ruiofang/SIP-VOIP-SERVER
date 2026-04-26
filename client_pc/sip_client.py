@@ -18,6 +18,7 @@ import shlex
 import socket
 import sys
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
@@ -51,6 +52,13 @@ def _extract_uri_user(value: str) -> Optional[str]:
         return None
     m = _URI_USER_RE.search(value)
     return m.group(1) if m else None
+
+
+def _normalize_user_token(user: str) -> str:
+    """统一用户标识格式，避免输入法空格/全角字符把 1002 变成 10。"""
+    # NFKC: 全角数字/字母转半角；随后移除任意空白。
+    v = unicodedata.normalize("NFKC", user or "")
+    return "".join(v.split())
 
 
 @dataclass
@@ -552,6 +560,9 @@ class SipUA:
                            content_type: str = "text/plain;charset=UTF-8"
                            ) -> Tuple[bool, Optional[str]]:
         """发送 SIP MESSAGE。返回 (是否 2xx, 服务端分配的 X-Message-ID)。"""
+        to_user = _normalize_user_token(to_user)
+        if not to_user:
+            return False, None
         nc = 0
         last_chal = None
         body = text.encode("utf-8")
@@ -657,6 +668,10 @@ class SipUA:
 
     # ====================== INVITE (主叫) ======================
     async def call(self, to_user: str) -> bool:
+        to_user = _normalize_user_token(to_user)
+        if not to_user:
+            print("目标账号不能为空")
+            return False
         if self.active_call:
             print("已有活跃通话，先 hangup")
             return False
@@ -1221,6 +1236,9 @@ async def repl(ua: SipUA, api: AdminAPI, user_api: UserAPI,
             break
         if not raw or raw.startswith("#"):
             continue
+        # 把中文输入法下常见的全角空格 / 全角标点替换成半角，
+        # 避免 shlex 把 "msg 1002　hello" 当成两个 token。
+        raw = raw.replace("\u3000", " ").replace("\xa0", " ")
         try:
             parts = shlex.split(raw)
         except ValueError:
