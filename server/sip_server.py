@@ -400,6 +400,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 await self._on_response(msg, addr)
         except Exception:
             logger.exception("handler error")
+            if msg.is_request:
+                try:
+                    self.send(build_response(msg, 500, "Server Internal Error"), addr)
+                except Exception:
+                    logger.exception("failed to send 500 response")
 
     # ============== 请求 ==============
     async def _on_request(self, msg: SipMessage, addr: Address) -> None:
