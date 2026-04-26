@@ -459,7 +459,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ctype = (msg.header("content-type") or "").lower()
                 if "application/sdp" in ctype and dlg and dlg.relay:
                     new_body, info = rewrite_sdp(
-                        msg.body, settings.public_host, dlg.relay.b_rtp_port)
+                        msg.body, settings.public_host, dlg.relay.a_rtp_port)
                     if info.media_ip and info.media_port:
                         self.relay.hint_remote(dlg.call_id, "B",
                                                (info.media_ip, info.media_port))
@@ -842,9 +842,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if msg.body and dlg.relay:
             ctype = (msg.header("content-type") or "").lower()
             if "application/sdp" in ctype:
-                # 主叫方向：用 leg_a 端口；被叫方向（re-INVITE 反向）：用 leg_b
-                relay_port = (dlg.relay.a_rtp_port if addr == dlg.caller_addr
-                              else dlg.relay.b_rtp_port)
+                # SDP 里公布的是“让对端把媒体发到哪里”。
+                # 主叫 offer 转给被叫时应公布 B 口；被叫 answer/反向 re-INVITE 转给主叫时应公布 A 口。
+                relay_port = (dlg.relay.b_rtp_port if addr == dlg.caller_addr
+                              else dlg.relay.a_rtp_port)
                 leg = "A" if addr == dlg.caller_addr else "B"
                 new_body, info = rewrite_sdp(msg.body, settings.public_host, relay_port)
                 if info.media_ip and info.media_port:

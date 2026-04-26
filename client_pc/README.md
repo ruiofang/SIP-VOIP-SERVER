@@ -67,6 +67,7 @@ sip> call 1002            # 拨打
 sip> hangup               # 挂断当前呼叫
 sip> answer               # 接听来电
 sip> reject               # 拒接来电
+sip> status               # 查看当前 SIP/RTP 统计（排查无音频时很有用）
 sip> calls                # 查看服务端实时通话
 sip> upload demo.wav 1002 # 上传语音并自动推送给 1002
 sip> quit
@@ -100,6 +101,7 @@ sip> scan-uri sipfriend://realm/user?token=xxxx
 | `--user` / `--password` | SIP 账号 | 必填 |
 | `--realm` | SIP realm（与服务端 `SIP_REALM` 一致） | `sip.example.com` |
 | `--rtp-port` | 本地 RTP 端口（0=自动，偶数） | `0` |
+| `--local-ip` | 强制写入 SDP/Contact 的本机地址，适合多网卡/VPN/直连媒体排障 | 自动探测 |
 | `--no-audio` | 不打开声卡，纯静默 RTP | 关闭 |
 | `--codec` | `pcmu` / `pcma` | `pcmu` |
 | `--api-base` | 管理后台 URL（用于 REST 测试） | 空=不启用 |
@@ -135,6 +137,12 @@ python sip_client.py --user 1001 --password secret123 \
 - **音频**：`sounddevice.InputStream/OutputStream` 16-bit PCM，
   `audioop.lin2ulaw` / `lin2alaw` 与 `ulaw2lin` / `alaw2lin` 编解码（标准库自带）。
 - **REST**：`requests` 同步访问后台，登录获取 JWT 后调用 `/api/...`，与浏览器 UI 等价。
+
+### 无音频排查
+
+- 通话显示 `200 OK 通话已建立` 后，客户端会在数秒内自动检查是否收到 RTP；若仍未收包，会提示执行 `status` 并检查本机 UDP/防火墙/安全组。
+- `status` 里如果 `pkts_sent` 持续增长但 `pkts_recv` 一直为 `0`，通常说明媒体回程没有到达本机。
+- 多网卡、VPN 或未经过服务器中继的直连场景，可尝试显式指定 `--local-ip`。
 
 ## 已知限制
 

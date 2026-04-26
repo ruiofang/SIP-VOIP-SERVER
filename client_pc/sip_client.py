@@ -357,6 +357,23 @@ class SipUA:
         self.incoming_addr: Optional[Tuple[str, int]] = None
         self.incoming_rtp: Optional[RtpSession] = None
 
+    async def _warn_if_no_rtp(self, call_id: str, delay: float = 3.0) -> None:
+        await asyncio.sleep(delay)
+        d = self.dialogs.get(call_id)
+        if not d or not d.rtp or d.rtp.pkts_recv > 0:
+            return
+        remote = f"{d.rtp.remote[0]}:{d.rtp.remote[1]}" if d.rtp.remote else "<unknown>"
+        hints = [
+            f"[RTP] 通话建立后 {int(delay)}s 仍未收到媒体包；当前远端={remote}",
+            "[RTP] 可先输入 status 查看 pkts_sent/pkts_recv；若 sent 持续增长而 recv 为 0，优先检查本机 UDP/防火墙/安全组。",
+        ]
+        if self.local_ip_override:
+            hints.append(f"[RTP] 当前已强制本端地址 --local-ip {self.local_ip_override}")
+        else:
+            hints.append("[RTP] 若处于多网卡、VPN 或直连媒体场景，可尝试用 --local-ip 指定可达的本机地址。")
+        for line in hints:
+            _async_print(line)
+
     # ---- 启动 ----
     async def start(self):
         loop = asyncio.get_running_loop()
@@ -835,6 +852,7 @@ class SipUA:
             d.confirmed = True
             print(f"[CALL] 200 OK 通话已建立", flush=True)
             self.on_event("call_established", {"call_id": d.call_id})
+            asyncio.create_task(self._warn_if_no_rtp(d.call_id))
             return
         # 失败
         self._send_ack_for_failure(d, msg, addr)
@@ -956,6 +974,7 @@ class SipUA:
         self.incoming_addr = None
         print("[CALL] 已接听", flush=True)
         self.on_event("call_established", {"call_id": callid})
+        asyncio.create_task(self._warn_if_no_rtp(callid))
         return True
 
     async def reject(self, code: int = 603, reason: str = "Decline") -> bool:
