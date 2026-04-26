@@ -1255,15 +1255,30 @@ async def repl(ua: SipUA, api: AdminAPI, user_api: UserAPI,
             atexit.register(lambda: _safe_write_history(hist_path))
         except ImportError:
             pass
-        # 异步读 stdin
+        # 异步读 stdin：用 daemon 线程，避免 Ctrl+C 后 atexit 卡在 join 上
+        import threading
         loop = asyncio.get_running_loop()
-        def _read():
-            try:
-                return input("sip> ")
-            except EOFError:
-                return "quit"
         async def next_line() -> str:
-            return await loop.run_in_executor(None, _read)
+            fut: asyncio.Future = loop.create_future()
+            def worker():
+                try:
+                    v = input("sip> ")
+                except EOFError:
+                    v = "quit"
+                except BaseException as e:  # noqa: BLE001
+                    loop.call_soon_threadsafe(
+                        lambda: fut.cancelled() or fut.set_exception(e))
+                    return
+                loop.call_soon_threadsafe(
+                    lambda: fut.cancelled() or fut.set_result(v))
+            t = threading.Thread(target=worker, name="sipc-stdin",
+                                 daemon=True)
+            t.start()
+            try:
+                return await fut
+            except asyncio.CancelledError:
+                # future 被取消 (主程序退出): 让 daemon 线程随进程结束
+                raise
     else:
         it = iter(script_lines)
         async def next_line() -> str:
@@ -1552,6 +1567,9 @@ def main():
         asyncio.run(amain(args))
     except KeyboardInterrupt:
         pass
+    finally:
+        # daemon 的 stdin 读线程可能仍阻塞在 input()，强制退出避免 atexit join 卡死
+        os._exit(0)
 
 
 if __name__ == "__main__":
