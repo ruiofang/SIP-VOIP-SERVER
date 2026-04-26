@@ -28,19 +28,27 @@ def verify_password(password: str, hashed: str) -> bool:
 
 # ---------- JWT ----------
 
-def create_access_token(sub: str, expires_minutes: int = 60 * 12) -> str:
+def create_access_token(sub: str, expires_minutes: int = 60 * 12,
+                        kind: str = "admin", **extra) -> str:
     payload = {
         "sub": sub,
+        "kind": kind,
         "exp": datetime.now(timezone.utc) + timedelta(minutes=expires_minutes),
         "iat": datetime.now(timezone.utc),
     }
+    payload.update(extra)
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
 def decode_token(token: str) -> Optional[str]:
+    """返回 sub（兼容旧调用）。"""
+    data = decode_token_full(token)
+    return data.get("sub") if data else None
+
+
+def decode_token_full(token: str) -> Optional[dict]:
     try:
-        data = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
-        return data.get("sub")
+        return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except JWTError:
         return None
 

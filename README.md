@@ -11,7 +11,8 @@
 - ✅ SIP OPTIONS（保活）
 - ✅ 语音消息：HTTP 上传 + 通过 SIP MESSAGE 推送下载链接
 - ✅ **Web 管理界面**（`/ui/`）：登录、设备账号 CRUD、在线状态、实时通话监控
-  + 强制挂断、消息历史、发送短信 / 上传语音
+  + 强制挂断、消息历史、发送短信 / 上传语音、好友关系管理
+- ✅ **好友系统**：用户互加 / 服务端审核 / 二维码扫码加好友（一次性 token）
 - ✅ MySQL / SQLite 持久化（阿里云 RDS 直连）
 - ✅ Docker Compose 一键部署
 - ✅ ESP-IDF C 客户端示例
@@ -31,6 +32,11 @@
 │   └── requirements.txt
 ├── client_esp32/
 │   ├── main/sip_client.c    # ESP32-S3 SIP 客户端示例
+│   └── README.md
+├── client_pc/
+│   ├── sip_client.py        # PC 端纯 Python 测试客户端
+│   ├── rtp.py / g711.py     # RTP + G.711 编解码
+│   ├── requirements.txt
 │   └── README.md
 ├── deploy/
 │   ├── docker-compose.yml
@@ -66,6 +72,27 @@ python main.py
 ## ESP32-S3 接入
 
 见 [client_esp32/README.md](client_esp32/README.md)
+
+## PC 测试客户端
+
+见 [client_pc/README.md](client_pc/README.md) — 纯 Python 实现，支持 REGISTER / MESSAGE /
+INVITE 真实通话 + RTP 音频，并可调用管理后台 REST API，方便端到端测试。
+
+## 好友系统
+
+支持三种加好友方式，可在客户端或服务端管理界面操作：
+
+| 流程 | 接口 | 说明 |
+| --- | --- | --- |
+| 申请 + 审核 | `POST /api/friends/request` → `POST /api/friends/{fid}/accept` | 发起方提交申请（pending），接收方在好友列表里通过/拒绝 |
+| 二维码扫码 | `POST /api/friends/invite` 生成 token → `POST /api/friends/scan` | 一次性 token，默认 10 分钟过期，扫码后立即互为好友 |
+| 管理员代加 | `POST /api/admin/friends` | 管理员可绕过审核直接建立关系，亦可在 Web `好友关系` 标签页查看/删除全部关系 |
+
+用户级 JWT：客户端使用 `POST /api/user/login`（用户名 + SIP 注册密码）登录获取令牌，
+和管理员令牌区分（JWT 里 `kind` 字段为 `user` / `admin`）。
+
+PC 客户端 REPL 命令：`friends`、`friend-add`、`friend-accept`、`qr [ttl] [note]`、
+`scan <token>`、`scan-uri <sipfriend://...>`，更多见 [client_pc/README.md](client_pc/README.md)。
 
 ## 作者
 

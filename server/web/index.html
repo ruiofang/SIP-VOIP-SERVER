@@ -163,6 +163,68 @@
           </div>
         </section>
 
+        <!-- 好友关系 -->
+        <section x-show="tab==='friends'">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-xl font-semibold">好友关系</h2>
+            <div class="flex gap-2">
+              <input x-model="friendFilter" placeholder="按用户名过滤"
+                     class="border px-3 py-1 rounded text-sm" />
+              <button @click="loadFriends" class="px-3 py-1 bg-slate-200 rounded">刷新</button>
+              <button @click="newFriendOpen = true" class="px-3 py-1 bg-blue-600 text-white rounded">+ 直接建立</button>
+            </div>
+          </div>
+          <p class="text-sm text-slate-500 mb-3">
+            管理员视图：可查看 / 直接建立 / 删除关系。
+            用户的「申请-通过」与「扫码加好友」流程在 PC 客户端 / 设备端进行（见 README）。
+          </p>
+          <div class="bg-white shadow rounded overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500">
+                <tr>
+                  <th class="text-left px-4 py-2">ID</th>
+                  <th class="text-left px-4 py-2">From</th>
+                  <th class="text-left px-4 py-2">To</th>
+                  <th class="text-left px-4 py-2">状态</th>
+                  <th class="text-left px-4 py-2">备注</th>
+                  <th class="text-left px-4 py-2">创建</th>
+                  <th class="text-left px-4 py-2">通过</th>
+                  <th class="px-4 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="f in friends" :key="f.id">
+                  <tr class="border-t hover:bg-slate-50">
+                    <td class="px-4 py-2 text-xs text-slate-500" x-text="f.id"></td>
+                    <td class="px-4 py-2 font-mono" x-text="f.from_user"></td>
+                    <td class="px-4 py-2 font-mono" x-text="f.to_user"></td>
+                    <td class="px-4 py-2">
+                      <span :class="{
+                              'bg-green-100 text-green-700': f.status==='accepted',
+                              'bg-yellow-100 text-yellow-700': f.status==='pending',
+                              'bg-red-100 text-red-700': f.status==='blocked',
+                            }"
+                            class="px-2 py-0.5 text-xs rounded" x-text="f.status"></span>
+                    </td>
+                    <td class="px-4 py-2 text-xs text-slate-500" x-text="f.note || '-'"></td>
+                    <td class="px-4 py-2 text-xs text-slate-500" x-text="fmt(f.created_at)"></td>
+                    <td class="px-4 py-2 text-xs text-slate-500" x-text="f.accepted_at ? fmt(f.accepted_at) : '-'"></td>
+                    <td class="px-4 py-2 text-right space-x-2">
+                      <template x-if="f.status==='pending'">
+                        <button @click="acceptFriend(f.id)" class="text-green-600 hover:underline">通过</button>
+                      </template>
+                      <button @click="deleteFriend(f.id)" class="text-red-600 hover:underline">删除</button>
+                    </td>
+                  </tr>
+                </template>
+                <tr x-show="!friends.length">
+                  <td colspan="8" class="text-center text-slate-400 py-8">暂无关系</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <!-- 消息历史 -->
         <section x-show="tab==='messages'">
           <div class="flex items-center justify-between mb-4">
@@ -286,6 +348,28 @@
         </form>
       </div>
 
+      <!-- 模态：新建好友关系 -->
+      <div x-show="newFriendOpen" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <form @submit.prevent="submitFriend" class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md space-y-3">
+          <h3 class="text-lg font-semibold">直接建立好友关系</h3>
+          <input x-model="friendForm.from_user" placeholder="from_user (SIP 用户名)"
+                 class="w-full border rounded px-3 py-2" required />
+          <input x-model="friendForm.to_user" placeholder="to_user (SIP 用户名)"
+                 class="w-full border rounded px-3 py-2" required />
+          <select x-model="friendForm.status" class="w-full border rounded px-3 py-2">
+            <option value="accepted">accepted（直接通过）</option>
+            <option value="pending">pending（等待对方通过）</option>
+            <option value="blocked">blocked（拉黑）</option>
+          </select>
+          <input x-model="friendForm.note" placeholder="备注（可选）"
+                 class="w-full border rounded px-3 py-2" />
+          <div class="flex justify-end gap-2 pt-2">
+            <button type="button" @click="newFriendOpen = false" class="px-4 py-1 rounded border">取消</button>
+            <button class="px-4 py-1 rounded bg-blue-600 text-white">保存</button>
+          </div>
+        </form>
+      </div>
+
       <!-- toast -->
       <div x-show="toast" x-transition
            class="fixed top-4 right-4 bg-slate-800 text-white px-4 py-2 rounded shadow z-50"
@@ -302,6 +386,7 @@ function app() {
     tabs: [
       { id: 'accounts', name: '设备账号' },
       { id: 'calls',    name: '实时通话' },
+      { id: 'friends',  name: '好友关系' },
       { id: 'messages', name: '消息历史' },
     ],
     loginForm: { username: '', password: '' },
@@ -309,6 +394,10 @@ function app() {
     accounts: [],
     calls: [],
     messages: [],
+    friends: [],
+    friendFilter: '',
+    newFriendOpen: false,
+    friendForm: { from_user: '', to_user: '', status: 'accepted', note: '' },
     msgFilter: '',
     autoRefresh: true,
     _timer: null,
@@ -376,6 +465,37 @@ function app() {
       if (this.tab === 'accounts') await this.loadAccounts();
       if (this.tab === 'calls')    await this.loadCalls();
       if (this.tab === 'messages') await this.loadMessages();
+      if (this.tab === 'friends')  await this.loadFriends();
+    },
+    async loadFriends() {
+      try {
+        const q = this.friendFilter ? '?user=' + encodeURIComponent(this.friendFilter) : '';
+        this.friends = await this.api('/api/friends' + q);
+      } catch (e) { this.showToast(e.message); }
+    },
+    async submitFriend() {
+      try {
+        await this.api('/api/admin/friends', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(this.friendForm),
+        });
+        this.newFriendOpen = false;
+        this.friendForm = { from_user: '', to_user: '', status: 'accepted', note: '' };
+        this.showToast('已创建');
+        this.loadFriends();
+      } catch (e) { this.showToast(e.message); }
+    },
+    async acceptFriend(id) {
+      try { await this.api('/api/friends/' + id + '/accept', { method: 'POST' });
+            this.showToast('已通过'); this.loadFriends(); }
+      catch (e) { this.showToast(e.message); }
+    },
+    async deleteFriend(id) {
+      if (!confirm('删除该好友关系?')) return;
+      try { await this.api('/api/friends/' + id, { method: 'DELETE' });
+            this.showToast('已删除'); this.loadFriends(); }
+      catch (e) { this.showToast(e.message); }
     },
     async loadAccounts() {
       try { this.accounts = await this.api('/api/accounts'); }

@@ -100,3 +100,39 @@ class VoiceFile(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     mime: Mapped[str] = mapped_column(String(64), default="audio/wav")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Friendship(Base):
+    """好友关系。
+
+    单行存储一对关系，from_user/to_user 不分先后；
+    status: pending(请求中) / accepted(已通过) / blocked(拉黑)。
+    """
+
+    __tablename__ = "friendships"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    from_user: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    to_user: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    note: Mapped[Optional[str]] = mapped_column(String(255))  # 申请附言 / 备注
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class InviteToken(Base):
+    """好友邀请令牌（用于扫码加好友）。"""
+
+    __tablename__ = "invite_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    owner: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(String(255))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_by: Mapped[Optional[str]] = mapped_column(String(64))
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+

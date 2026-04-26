@@ -1,0 +1,8 @@
+requests>=2.31
+# 可选：PCMU/PCMA 解码用 audioop 已内置；播放/录音可装下面任一：
+#   sounddevice + numpy（推荐，跨平台）
+#   或 PyAudio
+sounddevice>=0.4.6
+numpy>=1.26
+# 可选：终端打印好友邀请二维码（不装则只打印 payload 字符串）
+qrcode>=7.4

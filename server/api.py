@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -16,10 +16,11 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import (compute_ha1, create_access_token, decode_token,
-                   hash_password, verify_password)
+                   decode_token_full, hash_password, verify_password)
 from .config import get_settings
 from .db import get_session, init_db, session_scope
-from .models import Admin, Message, Registration, SipAccount, VoiceFile
+from .models import (Admin, Friendship, InviteToken, Message, Registration,
+                     SipAccount, VoiceFile)
 
 logger = logging.getLogger("api")
 settings = get_settings()
@@ -57,6 +58,31 @@ async def current_admin(token: str = Depends(oauth2_scheme),
     if not admin:
         raise HTTPException(401, "Admin not found")
     return admin
+
+
+class _Caller:
+    """统一的调用者：admin 或 SIP user。"""
+
+    def __init__(self, *, username: str, is_admin: bool):
+        self.username = username
+        self.is_admin = is_admin
+
+
+async def current_caller(token: str = Depends(oauth2_scheme),
+                         db: AsyncSession = Depends(get_session)) -> _Caller:
+    data = decode_token_full(token)
+    if not data or not data.get("sub"):
+        raise HTTPException(401, "Invalid token")
+    sub = data["sub"]
+    if data.get("kind") == "user":
+        res = await db.execute(select(SipAccount).where(SipAccount.username == sub))
+        if not res.scalar_one_or_none():
+            raise HTTPException(401, "user not found")
+        return _Caller(username=sub, is_admin=False)
+    res = await db.execute(select(Admin).where(Admin.username == sub))
+    if not res.scalar_one_or_none():
+        raise HTTPException(401, "admin not found")
+    return _Caller(username=sub, is_admin=True)
 
 
 # ============== Schema ==============
@@ -137,6 +163,293 @@ async def change_password(old_password: str = Form(...), new_password: str = For
     db.add(admin)
     await db.commit()
     return {"ok": True}
+
+
+# ============== SIP 用户自助登录（用于好友功能等） ==============
+@app.post("/api/user/login", response_model=LoginResp)
+async def user_login(form: OAuth2PasswordRequestForm = Depends(),
+                     db: AsyncSession = Depends(get_session)) -> LoginResp:
+    """SIP 用户用自身的 SIP 账号密码登录，获取 user-kind JWT。"""
+    res = await db.execute(select(SipAccount).where(SipAccount.username == form.username))
+    acc = res.scalar_one_or_none()
+    if not acc or not acc.enabled:
+        raise HTTPException(401, "Invalid credentials")
+    if acc.ha1 != compute_ha1(acc.username, acc.realm, form.password):
+        raise HTTPException(401, "Invalid credentials")
+    return LoginResp(access_token=create_access_token(acc.username, kind="user"))
+
+
+# ============== 好友 ==============
+class FriendRequestReq(BaseModel):
+    to_user: str
+    note: Optional[str] = None
+
+
+class FriendOut(BaseModel):
+    id: int
+    from_user: str
+    to_user: str
+    peer: str          # 相对调用者的对端
+    direction: str     # outgoing/incoming/self
+    status: str
+    note: Optional[str] = None
+    created_at: datetime
+    accepted_at: Optional[datetime] = None
+
+
+class InviteCreateReq(BaseModel):
+    note: Optional[str] = None
+    ttl_seconds: int = 600
+
+
+class InviteOut(BaseModel):
+    token: str
+    owner: str
+    payload: str
+    expires_at: datetime
+    note: Optional[str] = None
+
+
+class ScanReq(BaseModel):
+    token: str
+    note: Optional[str] = None
+
+
+def _friend_to_out(f: Friendship, viewer: str) -> FriendOut:
+    if f.from_user == viewer and f.to_user == viewer:
+        peer, direction = viewer, "self"
+    elif f.from_user == viewer:
+        peer, direction = f.to_user, "outgoing"
+    elif f.to_user == viewer:
+        peer, direction = f.from_user, "incoming"
+    else:
+        peer, direction = f.to_user, "admin-view"
+    return FriendOut(
+        id=f.id, from_user=f.from_user, to_user=f.to_user,
+        peer=peer, direction=direction,
+        status=f.status, note=f.note,
+        created_at=f.created_at, accepted_at=f.accepted_at,
+    )
+
+
+async def _existing_friendship(db: AsyncSession, a: str, b: str) -> Optional[Friendship]:
+    res = await db.execute(select(Friendship).where(
+        ((Friendship.from_user == a) & (Friendship.to_user == b)) |
+        ((Friendship.from_user == b) & (Friendship.to_user == a))
+    ))
+    return res.scalars().first()
+
+
+@app.get("/api/friends", response_model=list[FriendOut])
+async def list_friends(user: Optional[str] = None,
+                       caller: _Caller = Depends(current_caller),
+                       db: AsyncSession = Depends(get_session)) -> list[FriendOut]:
+    """列出好友 / 待处理请求。
+
+    - user-kind token: 只能看自己的（user 参数被忽略）
+    - admin token: 不传 user 看全部；传 user 仅看该用户
+    """
+    if not caller.is_admin:
+        target = caller.username
+        stmt = select(Friendship).where(
+            (Friendship.from_user == target) | (Friendship.to_user == target)
+        ).order_by(desc(Friendship.created_at))
+    elif user:
+        stmt = select(Friendship).where(
+            (Friendship.from_user == user) | (Friendship.to_user == user)
+        ).order_by(desc(Friendship.created_at))
+        target = user
+    else:
+        stmt = select(Friendship).order_by(desc(Friendship.created_at))
+        target = ""
+    res = await db.execute(stmt)
+    return [_friend_to_out(f, target) for f in res.scalars()]
+
+
+@app.post("/api/friends/request", response_model=FriendOut)
+async def friend_request(payload: FriendRequestReq,
+                         caller: _Caller = Depends(current_caller),
+                         db: AsyncSession = Depends(get_session)) -> FriendOut:
+    """发起好友申请（pending）。仅用户登录可用；admin 想直接代加用 /api/admin/friends。"""
+    if caller.is_admin:
+        raise HTTPException(400, "admin should use /api/admin/friends")
+    if payload.to_user == caller.username:
+        raise HTTPException(400, "cannot friend yourself")
+    res = await db.execute(select(SipAccount).where(SipAccount.username == payload.to_user))
+    if not res.scalar_one_or_none():
+        raise HTTPException(404, "target user not found")
+    existing = await _existing_friendship(db, caller.username, payload.to_user)
+    if existing:
+        return _friend_to_out(existing, caller.username)
+    f = Friendship(from_user=caller.username, to_user=payload.to_user,
+                   status="pending", note=payload.note)
+    db.add(f)
+    await db.commit()
+    await db.refresh(f)
+    return _friend_to_out(f, caller.username)
+
+
+async def _get_friendship(db: AsyncSession, fid: int) -> Friendship:
+    res = await db.execute(select(Friendship).where(Friendship.id == fid))
+    f = res.scalar_one_or_none()
+    if not f:
+        raise HTTPException(404, "friendship not found")
+    return f
+
+
+@app.post("/api/friends/{fid}/accept", response_model=FriendOut)
+async def friend_accept(fid: int, caller: _Caller = Depends(current_caller),
+                        db: AsyncSession = Depends(get_session)) -> FriendOut:
+    f = await _get_friendship(db, fid)
+    if not caller.is_admin and caller.username != f.to_user:
+        raise HTTPException(403, "only recipient can accept")
+    if f.status == "accepted":
+        return _friend_to_out(f, caller.username)
+    f.status = "accepted"
+    f.accepted_at = datetime.now(timezone.utc)
+    db.add(f)
+    await db.commit()
+    await db.refresh(f)
+    return _friend_to_out(f, caller.username)
+
+
+@app.post("/api/friends/{fid}/reject", status_code=204)
+async def friend_reject(fid: int, caller: _Caller = Depends(current_caller),
+                        db: AsyncSession = Depends(get_session)) -> None:
+    f = await _get_friendship(db, fid)
+    if not caller.is_admin and caller.username != f.to_user:
+        raise HTTPException(403, "only recipient can reject")
+    await db.delete(f)
+    await db.commit()
+
+
+@app.delete("/api/friends/{fid}", status_code=204)
+async def friend_delete(fid: int, caller: _Caller = Depends(current_caller),
+                        db: AsyncSession = Depends(get_session)) -> None:
+    f = await _get_friendship(db, fid)
+    if not caller.is_admin and caller.username not in (f.from_user, f.to_user):
+        raise HTTPException(403, "forbidden")
+    await db.delete(f)
+    await db.commit()
+
+
+@app.post("/api/friends/invite", response_model=InviteOut)
+async def friend_invite(payload: InviteCreateReq,
+                        caller: _Caller = Depends(current_caller),
+                        db: AsyncSession = Depends(get_session)) -> InviteOut:
+    """生成扫码邀请令牌。仅 SIP 用户可用。返回 payload 字符串供 QR 编码。"""
+    if caller.is_admin:
+        raise HTTPException(400, "admin cannot create invite (use a user account)")
+    ttl = max(30, min(payload.ttl_seconds, 24 * 3600))
+    tok = secrets.token_urlsafe(16)
+    exp = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+    inv = InviteToken(token=tok, owner=caller.username, note=payload.note, expires_at=exp)
+    db.add(inv)
+    await db.commit()
+    await db.refresh(inv)
+    qr_payload = f"sipfriend://{settings.sip_realm}/{caller.username}?token={tok}"
+    return InviteOut(token=tok, owner=caller.username, payload=qr_payload,
+                     expires_at=exp, note=payload.note)
+
+
+@app.post("/api/friends/scan", response_model=FriendOut)
+async def friend_scan(payload: ScanReq,
+                      caller: _Caller = Depends(current_caller),
+                      db: AsyncSession = Depends(get_session)) -> FriendOut:
+    """扫码加好友：消费 token 后立即建立 accepted 关系。"""
+    if caller.is_admin:
+        raise HTTPException(400, "scan requires user-kind token")
+    res = await db.execute(select(InviteToken).where(InviteToken.token == payload.token))
+    inv = res.scalar_one_or_none()
+    if not inv:
+        raise HTTPException(404, "invalid token")
+    if inv.used_by:
+        raise HTTPException(410, "token already used")
+    exp = inv.expires_at
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp < datetime.now(timezone.utc):
+        raise HTTPException(410, "token expired")
+    if inv.owner == caller.username:
+        raise HTTPException(400, "cannot scan your own invite")
+    existing = await _existing_friendship(db, inv.owner, caller.username)
+    now = datetime.now(timezone.utc)
+    if existing:
+        if existing.status != "accepted":
+            existing.status = "accepted"
+            existing.accepted_at = now
+            db.add(existing)
+        f = existing
+    else:
+        f = Friendship(from_user=inv.owner, to_user=caller.username,
+                       status="accepted", note=payload.note,
+                       accepted_at=now)
+        db.add(f)
+    inv.used_by = caller.username
+    inv.used_at = now
+    db.add(inv)
+    await db.commit()
+    await db.refresh(f)
+    return _friend_to_out(f, caller.username)
+
+
+@app.get("/api/friends/invites", response_model=list[InviteOut])
+async def list_my_invites(caller: _Caller = Depends(current_caller),
+                          db: AsyncSession = Depends(get_session)) -> list[InviteOut]:
+    if caller.is_admin:
+        raise HTTPException(400, "admin has no invites")
+    res = await db.execute(select(InviteToken).where(
+        InviteToken.owner == caller.username
+    ).order_by(desc(InviteToken.created_at)).limit(50))
+    out = []
+    for inv in res.scalars():
+        out.append(InviteOut(
+            token=inv.token, owner=inv.owner,
+            payload=f"sipfriend://{settings.sip_realm}/{inv.owner}?token={inv.token}",
+            expires_at=inv.expires_at, note=inv.note,
+        ))
+    return out
+
+
+# ---- 管理员：直接建立 / 拉黑好友关系 ----
+class AdminFriendCreateReq(BaseModel):
+    from_user: str
+    to_user: str
+    status: str = "accepted"   # pending/accepted/blocked
+    note: Optional[str] = None
+
+
+@app.post("/api/admin/friends", response_model=FriendOut)
+async def admin_create_friend(payload: AdminFriendCreateReq,
+                              _: Admin = Depends(current_admin),
+                              db: AsyncSession = Depends(get_session)) -> FriendOut:
+    if payload.status not in ("pending", "accepted", "blocked"):
+        raise HTTPException(400, "bad status")
+    if payload.from_user == payload.to_user:
+        raise HTTPException(400, "from == to")
+    for u in (payload.from_user, payload.to_user):
+        res = await db.execute(select(SipAccount).where(SipAccount.username == u))
+        if not res.scalar_one_or_none():
+            raise HTTPException(404, f"user not found: {u}")
+    existing = await _existing_friendship(db, payload.from_user, payload.to_user)
+    now = datetime.now(timezone.utc)
+    if existing:
+        existing.status = payload.status
+        existing.note = payload.note or existing.note
+        if payload.status == "accepted" and not existing.accepted_at:
+            existing.accepted_at = now
+        db.add(existing)
+        await db.commit()
+        await db.refresh(existing)
+        return _friend_to_out(existing, "")
+    f = Friendship(from_user=payload.from_user, to_user=payload.to_user,
+                   status=payload.status, note=payload.note,
+                   accepted_at=now if payload.status == "accepted" else None)
+    db.add(f)
+    await db.commit()
+    await db.refresh(f)
+    return _friend_to_out(f, "")
+
 
 
 # ============== 设备账号 CRUD ==============
