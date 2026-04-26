@@ -1395,27 +1395,117 @@ async def repl(ua: SipUA, api: AdminAPI, user_api: UserAPI,
 # main
 # =====================================================================
 
+# 默认 JSON 配置文件路径：与 sip_client.py 同目录的 client_config.json
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "client_config.json")
+
+# CLI 参数名 → JSON 字段名（破折号转下划线即可，这里显式列出便于校验）
+_CFG_KEYS = [
+    "server", "sip_port", "local_port", "user", "password", "realm",
+    "rtp_port", "codec", "no_audio", "auto_answer", "no_auto_read",
+    "api_base", "admin_user", "admin_password", "script", "no_register",
+    "debug",
+]
+
+_CONFIG_TEMPLATE = {
+    "server": "120.27.145.121",
+    "sip_port": 5060,
+    "user": "1001",
+    "password": "secret123",
+    "realm": "sip.example.com",
+    "codec": "pcmu",
+    "api_base": "http://120.27.145.121:8000",
+    "admin_user": "",
+    "admin_password": "",
+    "no_audio": False,
+    "auto_answer": False,
+    "no_auto_read": False,
+    "no_register": False,
+    "debug": False,
+    "local_port": 0,
+    "rtp_port": 0,
+    "script": ""
+}
+
+
+def _load_json_config(path: str) -> Dict:
+    """读取 JSON 配置文件；若不存在则写入模板并返回空 dict。"""
+    if not os.path.exists(path):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(_CONFIG_TEMPLATE, f, ensure_ascii=False, indent=2)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            print(f"[*] 已生成示例配置: {path}\n    请填入 server/user/password 后再次启动。",
+                  file=sys.stderr)
+        except OSError as e:
+            print(f"[!] 无法创建配置文件 {path}: {e}", file=sys.stderr)
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[!] 读取配置文件失败 {path}: {e}", file=sys.stderr)
+        return {}
+    if not isinstance(data, dict):
+        print(f"[!] 配置文件格式错误 (顶层应为对象): {path}", file=sys.stderr)
+        return {}
+    unknown = [k for k in data if k not in _CFG_KEYS and k != "_comment"]
+    if unknown:
+        print(f"[!] 配置中存在未知字段 (已忽略): {unknown}", file=sys.stderr)
+    return data
+
+
 def parse_args():
-    ap = argparse.ArgumentParser(description="SIP-VOIP-SERVER PC 测试客户端")
-    ap.add_argument("--server", required=True)
-    ap.add_argument("--sip-port", type=int, default=5060)
-    ap.add_argument("--local-port", type=int, default=0)
-    ap.add_argument("--user", required=True)
-    ap.add_argument("--password", required=True)
-    ap.add_argument("--realm", default="sip.example.com")
-    ap.add_argument("--rtp-port", type=int, default=0)
-    ap.add_argument("--codec", default="pcmu", choices=["pcmu", "pcma"])
-    ap.add_argument("--no-audio", action="store_true")
-    ap.add_argument("--auto-answer", action="store_true")
+    # 先扫一遍 sys.argv 找 --config，以便用 JSON 提供默认值
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    pre.add_argument("--no-config", action="store_true",
+                     help="忽略 JSON 配置文件，仅使用命令行/默认值")
+    pre_args, _ = pre.parse_known_args()
+    cfg: Dict = {} if pre_args.no_config else _load_json_config(pre_args.config)
+
+    def _cfg(name, default=None):
+        v = cfg.get(name)
+        return default if v is None else v
+
+    ap = argparse.ArgumentParser(
+        description="SIP-VOIP-SERVER PC 测试客户端",
+        parents=[pre],
+    )
+    ap.add_argument("--server",
+                    required=("server" not in cfg or not cfg.get("server")),
+                    default=_cfg("server"))
+    ap.add_argument("--sip-port", type=int, default=_cfg("sip_port", 5060))
+    ap.add_argument("--local-port", type=int, default=_cfg("local_port", 0))
+    ap.add_argument("--user",
+                    required=("user" not in cfg or not cfg.get("user")),
+                    default=_cfg("user"))
+    ap.add_argument("--password",
+                    required=("password" not in cfg or not cfg.get("password")),
+                    default=_cfg("password"))
+    ap.add_argument("--realm", default=_cfg("realm", "sip.example.com"))
+    ap.add_argument("--rtp-port", type=int, default=_cfg("rtp_port", 0))
+    ap.add_argument("--codec", default=_cfg("codec", "pcmu"),
+                    choices=["pcmu", "pcma"])
+    ap.add_argument("--no-audio", action="store_true",
+                    default=bool(_cfg("no_audio", False)))
+    ap.add_argument("--auto-answer", action="store_true",
+                    default=bool(_cfg("auto_answer", False)))
     ap.add_argument("--no-auto-read", action="store_true",
+                    default=bool(_cfg("no_auto_read", False)),
                     help="收到消息后不自动发送已读回执")
-    ap.add_argument("--api-base", default="")
-    ap.add_argument("--admin-user", default="")
-    ap.add_argument("--admin-password", default="")
-    ap.add_argument("--script", default="")
+    ap.add_argument("--api-base", default=_cfg("api_base", ""))
+    ap.add_argument("--admin-user", default=_cfg("admin_user", ""))
+    ap.add_argument("--admin-password", default=_cfg("admin_password", ""))
+    ap.add_argument("--script", default=_cfg("script", ""))
     ap.add_argument("--no-register", action="store_true",
+                    default=bool(_cfg("no_register", False)),
                     help="启动时不自动注册")
-    ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--debug", action="store_true",
+                    default=bool(_cfg("debug", False)))
     return ap.parse_args()
 
 

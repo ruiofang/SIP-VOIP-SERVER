@@ -1,0 +1,19 @@
+{
+  "server": "120.27.145.121",
+  "sip_port": 5060,
+  "user": "1001",
+  "password": "root123",
+  "realm": "sip.example.com",
+  "codec": "pcmu",
+  "api_base": "http://120.27.145.121:8000",
+  "admin_user": "",
+  "admin_password": "",
+  "no_audio": false,
+  "auto_answer": false,
+  "no_auto_read": false,
+  "no_register": false,
+  "debug": false,
+  "local_port": 0,
+  "rtp_port": 0,
+  "script": ""
+}
