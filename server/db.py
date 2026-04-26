@@ -28,6 +28,38 @@ _MIGRATIONS: list[tuple[str, str, str, str]] = [
 
 def _sync_migrate(conn) -> None:
     dialect = conn.dialect.name
+    # ---- 修复 SQLite 下 messages.id 被建为 BIGINT 而无法自增的历史库 ----
+    if dialect == "sqlite":
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(messages)").fetchall()
+            id_row = next((r for r in rows if r[1] == "id"), None)
+            if id_row and str(id_row[2]).upper() != "INTEGER":
+                # 删除旧表的索引避免重建后命名冲突
+                idx_rows = conn.exec_driver_sql(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='index' AND tbl_name='messages' "
+                    "AND name NOT LIKE 'sqlite_autoindex_%'"
+                ).fetchall()
+                for (idx_name,) in idx_rows:
+                    conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{idx_name}"')
+                conn.exec_driver_sql("ALTER TABLE messages RENAME TO messages_old")
+                from .models import Message  # noqa
+                Message.__table__.create(bind=conn)
+                conn.exec_driver_sql(
+                    "INSERT INTO messages "
+                    "(id, from_user, to_user, msg_type, body, delivered, "
+                    " status, attempts, created_at, delivered_at) "
+                    "SELECT id, from_user, to_user, msg_type, body, "
+                    "       COALESCE(delivered, 0), "
+                    "       CASE WHEN delivered=1 THEN 'delivered' ELSE 'pending' END, "
+                    "       0, created_at, delivered_at "
+                    "FROM messages_old"
+                )
+                conn.exec_driver_sql("DROP TABLE messages_old")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).exception("messages id migration failed: %s", e)
+
     for table, col, ddl_type, default_sql in _MIGRATIONS:
         if dialect == "sqlite":
             rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()

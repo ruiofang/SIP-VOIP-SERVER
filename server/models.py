@@ -13,6 +13,11 @@ from typing import Optional
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+# SQLite 只有 INTEGER PRIMARY KEY 才会作为 rowid 自动自增；
+# 直接用 BigInteger 会渲染成 BIGINT，导致 INSERT 时 id 为 NULL 而失败。
+# 用 with_variant 在 SQLite 下回退为 Integer，其它数据库仍是 BIGINT。
+BigIntPK = BigInteger().with_variant(Integer(), "sqlite")
+
 
 class Base(DeclarativeBase):
     pass
@@ -85,7 +90,7 @@ class Message(Base):
 
     __tablename__ = "messages"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
     from_user: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     to_user: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     msg_type: Mapped[str] = mapped_column(String(16), nullable=False)  # text / voice
