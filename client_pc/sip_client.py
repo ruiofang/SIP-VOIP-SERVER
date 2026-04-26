@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -216,6 +217,28 @@ def parse_sdp_audio(body: bytes) -> Optional[Tuple[str, int]]:
         return None
 
 
+def _is_private_or_special_ip(host: str) -> bool:
+    """是否为私网/回环/链路本地/保留地址（NAT 场景常不可直达）。"""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    )
+
+
+def _pick_rtp_remote(sdp_host: str, sdp_port: int, sig_addr: Optional[Tuple[str, int]]) -> Tuple[str, int]:
+    """优先使用 SDP 地址；若 SDP 给的是私网而信令来源是公网，则回退到信令来源 IP。"""
+    if not sig_addr:
+        return sdp_host, sdp_port
+    sig_host = sig_addr[0]
+    if _is_private_or_special_ip(sdp_host) and not _is_private_or_special_ip(sig_host):
+        return sig_host, sdp_port
+    return sdp_host, sdp_port
+
+
 # =====================================================================
 # Digest
 # =====================================================================
@@ -304,7 +327,7 @@ class SipUA:
                  realm: str, local_port: int = 0, rtp_port: int = 0,
                  codec: str = "pcmu", use_audio: bool = True,
                  auto_answer: bool = False, auto_read: bool = True,
-                 on_event=None):
+                 local_ip_override: str = "", on_event=None):
         self.server_host = server_host
         self.server_port = server_port
         self.user = user
@@ -316,6 +339,7 @@ class SipUA:
         self.use_audio = use_audio
         self.auto_answer = auto_answer
         self.auto_read = auto_read
+        self.local_ip_override = (local_ip_override or "").strip()
         self.on_event = on_event or (lambda *a, **kw: None)
 
         self.transport: Optional[asyncio.DatagramTransport] = None
@@ -336,13 +360,16 @@ class SipUA:
     # ---- 启动 ----
     async def start(self):
         loop = asyncio.get_running_loop()
-        # 探测出口 IP
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect((self.server_host, self.server_port))
-                self.local_ip = s.getsockname()[0]
-        except Exception:
-            self.local_ip = "127.0.0.1"
+        # 探测出口 IP（可用 --local-ip 强制覆盖，适配多网卡/VPN 场景）
+        if self.local_ip_override:
+            self.local_ip = self.local_ip_override
+        else:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.connect((self.server_host, self.server_port))
+                    self.local_ip = s.getsockname()[0]
+            except Exception:
+                self.local_ip = "127.0.0.1"
         self.transport, _ = await loop.create_datagram_endpoint(
             lambda: _SipUdpProtocol(self._on_dgram),
             local_addr=("0.0.0.0", self.local_port),
@@ -789,7 +816,13 @@ class SipUA:
             if "sdp" in ct.lower():
                 au = parse_sdp_audio(msg.body)
                 if au and d.rtp:
-                    d.rtp.set_remote(au[0], au[1])
+                    remote_host, remote_port = _pick_rtp_remote(au[0], au[1], addr)
+                    if (remote_host, remote_port) != au:
+                        log.warning(
+                            "RTP SDP地址 %s:%s 可能不可达，回退为信令源 %s:%s",
+                            au[0], au[1], remote_host, remote_port,
+                        )
+                    d.rtp.set_remote(remote_host, remote_port)
             # Contact 作为后续目标
             ctc = msg.header("Contact") or ""
             cm = re.search(r"<([^>]+)>", ctc)
@@ -880,7 +913,13 @@ class SipUA:
         # 解析对端 SDP
         au = parse_sdp_audio(msg.body) if msg.body else None
         if au:
-            rtp.set_remote(au[0], au[1])
+            remote_host, remote_port = _pick_rtp_remote(au[0], au[1], addr)
+            if (remote_host, remote_port) != au:
+                log.warning(
+                    "RTP SDP地址 %s:%s 可能不可达，回退为信令源 %s:%s",
+                    au[0], au[1], remote_host, remote_port,
+                )
+            rtp.set_remote(remote_host, remote_port)
         # 构造 dialog
         m = re.search(r"tag=([^;,\s]+)", ftag)
         remote_tag = m.group(1) if m else ""
@@ -1419,7 +1458,7 @@ _CFG_KEYS = [
     "server", "sip_port", "local_port", "user", "password", "realm",
     "rtp_port", "codec", "no_audio", "auto_answer", "no_auto_read",
     "api_base", "admin_user", "admin_password", "script", "no_register",
-    "debug",
+    "debug", "local_ip",
 ]
 
 _CONFIG_TEMPLATE = {
@@ -1437,6 +1476,7 @@ _CONFIG_TEMPLATE = {
     "no_auto_read": False,
     "no_register": False,
     "debug": False,
+    "local_ip": "",
     "local_port": 0,
     "rtp_port": 0,
     "script": ""
@@ -1495,6 +1535,8 @@ def parse_args():
                     default=_cfg("server"))
     ap.add_argument("--sip-port", type=int, default=_cfg("sip_port", 5060))
     ap.add_argument("--local-port", type=int, default=_cfg("local_port", 0))
+    ap.add_argument("--local-ip", default=_cfg("local_ip", ""),
+                    help="强制本机在 SIP/SDP 中使用的 IP（多网卡/VPN 时可修复无声）")
     ap.add_argument("--user",
                     required=("user" not in cfg or not cfg.get("user")),
                     default=_cfg("user"))
@@ -1533,6 +1575,7 @@ async def amain(args):
         server_host=args.server, server_port=args.sip_port,
         user=args.user, password=args.password, realm=args.realm,
         local_port=args.local_port, rtp_port=args.rtp_port,
+        local_ip_override=args.local_ip,
         codec=args.codec, use_audio=not args.no_audio,
         auto_answer=args.auto_answer,
         auto_read=not args.no_auto_read,
