@@ -24,14 +24,16 @@ def _setup_logging() -> None:
 
 def _warn_public_host() -> None:
     log = logging.getLogger("boot")
+    relay_mode = "sticky" if settings.rtp_sticky_mode else "pool"
     log.info(
-        "PUBLIC_HOST=%s SIP=%s/%s API=%s RTP=%s-%s",
+        "PUBLIC_HOST=%s SIP=%s/%s API=%s RTP=%s-%s mode=%s",
         settings.public_host,
         settings.sip_host,
         settings.sip_port,
         settings.api_port,
         settings.rtp_port_min,
         settings.rtp_port_max,
+        relay_mode,
     )
     try:
         ip = ipaddress.ip_address(settings.public_host)

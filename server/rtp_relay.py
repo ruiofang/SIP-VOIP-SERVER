@@ -147,7 +147,16 @@ class RelaySession:
 
 
 class RtpRelayManager:
-    def __init__(self, host: str, public_host: str, port_min: int, port_max: int) -> None:
+    def __init__(
+        self,
+        host: str,
+        public_host: str,
+        port_min: int,
+        port_max: int,
+        *,
+        sticky_mode: bool = False,
+        sticky_port: Optional[int] = None,
+    ) -> None:
         self.host = host
         self.public_host = public_host
         self.port_min = port_min if port_min % 2 == 0 else port_min + 1
@@ -155,6 +164,9 @@ class RtpRelayManager:
         self._next = self.port_min
         self._sessions: Dict[str, RelaySession] = {}
         self._lock = asyncio.Lock()
+        self.sticky_mode = sticky_mode
+        sp = sticky_port if sticky_port is not None else self.port_min
+        self.sticky_port = sp if sp % 2 == 0 else sp + 1
 
     async def _allocate_pair(self) -> Tuple[asyncio.DatagramTransport, asyncio.DatagramTransport,
                                             int, int, _LegProtocol, _LegProtocol]:
@@ -186,13 +198,40 @@ class RtpRelayManager:
                 continue
         raise RuntimeError("RTP port pool exhausted")
 
+    async def _allocate_fixed_pair(
+        self, port: int
+    ) -> Tuple[asyncio.DatagramTransport, asyncio.DatagramTransport, int, int, _LegProtocol, _LegProtocol]:
+        """Allocate a fixed RTP/RTCP port pair."""
+        loop = asyncio.get_event_loop()
+        placeholder_leg = RelayLeg.__new__(RelayLeg)
+        rtp_proto = _LegProtocol(placeholder_leg, False)
+        rtcp_proto = _LegProtocol(placeholder_leg, True)
+        rtp_t, _ = await loop.create_datagram_endpoint(
+            lambda: rtp_proto, local_addr=(self.host, port)
+        )
+        try:
+            rtcp_t, _ = await loop.create_datagram_endpoint(
+                lambda: rtcp_proto, local_addr=(self.host, port + 1)
+            )
+        except OSError:
+            rtp_t.close()
+            raise
+        return rtp_t, rtcp_t, port, port + 1, rtp_proto, rtcp_proto
+
     async def allocate(self, call_id: str) -> RelaySession:
         async with self._lock:
             if call_id in self._sessions:
                 return self._sessions[call_id]
 
-            (rtp_a_t, rtcp_a_t, port_a, _, rtp_a_p, rtcp_a_p) = await self._allocate_pair()
-            (rtp_b_t, rtcp_b_t, port_b, _, rtp_b_p, rtcp_b_p) = await self._allocate_pair()
+            if self.sticky_mode and self._sessions:
+                raise RuntimeError("sticky RTP mode supports one active call")
+
+            if self.sticky_mode:
+                (rtp_a_t, rtcp_a_t, port_a, _, rtp_a_p, rtcp_a_p) = await self._allocate_fixed_pair(self.sticky_port)
+                (rtp_b_t, rtcp_b_t, port_b, _, rtp_b_p, rtcp_b_p) = await self._allocate_fixed_pair(self.sticky_port + 2)
+            else:
+                (rtp_a_t, rtcp_a_t, port_a, _, rtp_a_p, rtcp_a_p) = await self._allocate_pair()
+                (rtp_b_t, rtcp_b_t, port_b, _, rtp_b_p, rtcp_b_p) = await self._allocate_pair()
 
             leg_a = RelayLeg("A", port_a, port_a + 1, rtp_a_p, rtcp_a_p)
             leg_b = RelayLeg("B", port_b, port_b + 1, rtp_b_p, rtcp_b_p)
@@ -207,7 +246,8 @@ class RtpRelayManager:
             session = RelaySession(call_id=call_id, leg_a=leg_a, leg_b=leg_b,
                                    public_host=self.public_host)
             self._sessions[call_id] = session
-            logger.info("[relay alloc] call=%s A=%d B=%d", call_id, port_a, port_b)
+            mode = "sticky" if self.sticky_mode else "pool"
+            logger.info("[relay alloc] call=%s A=%d B=%d mode=%s", call_id, port_a, port_b, mode)
             return session
 
     def get(self, call_id: str) -> Optional[RelaySession]:

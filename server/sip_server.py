@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import re
@@ -137,6 +138,38 @@ def parse_kv(value: str) -> Dict[str, str]:
     for part in re.findall(r'(\w+)\s*=\s*("([^"]*)"|([^,\s]+))', value):
         out[part[0].lower()] = part[2] if part[2] else part[3]
     return out
+
+
+def _is_private_or_special_ip(host: str) -> bool:
+    """Return True for private/loopback/link-local/reserved/multicast/unspecified IP."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    )
+
+
+def _pick_hint_remote(
+    sdp_host: Optional[str],
+    sdp_port: Optional[int],
+    sig_addr: Optional[Address],
+) -> Optional[Address]:
+    """Pick a better RTP hint endpoint.
+
+    Prefer SDP host/port; if SDP host is private/special and signaling source IP is public,
+    fall back to signaling source IP while keeping the SDP media port.
+    """
+    if not sdp_host or not sdp_port or sdp_port <= 0:
+        return None
+    if not sig_addr:
+        return (sdp_host, sdp_port)
+    sig_host = sig_addr[0]
+    if _is_private_or_special_ip(sdp_host) and not _is_private_or_special_ip(sig_host):
+        return (sig_host, sdp_port)
+    return (sdp_host, sdp_port)
 
 
 def parse_via(value: str) -> Tuple[str, int, Dict[str, str]]:
@@ -288,7 +321,7 @@ class OnlineRecord:
 STATUS_CT = "application/x-message-status+json"
 
 # 投递参数
-DELIVERY_RETRY_INTERVAL = 4.0   # 单次重试间隔（秒）
+DELIVERY_RETRY_INTERVAL = 3.0   # 单次重试间隔（秒）
 DELIVERY_MAX_ATTEMPTS = 5       # 最大重试次数
 DELIVERY_TX_TIMEOUT = 8.0       # 等待对端 200 OK 的时长
 
@@ -348,6 +381,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             public_host=settings.public_host,
             port_min=settings.rtp_port_min,
             port_max=settings.rtp_port_max,
+            sticky_mode=settings.rtp_sticky_mode,
+            sticky_port=settings.rtp_sticky_port,
         )
         self._gc_task: Optional[asyncio.Task] = None
         self._retry_task: Optional[asyncio.Task] = None
@@ -460,9 +495,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 if "application/sdp" in ctype and dlg and dlg.relay:
                     new_body, info = rewrite_sdp(
                         msg.body, settings.public_host, dlg.relay.a_rtp_port)
-                    if info.media_ip and info.media_port:
-                        self.relay.hint_remote(dlg.call_id, "B",
-                                               (info.media_ip, info.media_port))
+                    hint = _pick_hint_remote(info.media_ip, info.media_port, addr)
+                    if hint:
+                        self.relay.hint_remote(dlg.call_id, "B", hint)
                     msg.body = new_body
                     replace_header(msg, "content-length", str(len(new_body)))
             self._rewrite_contact(msg)
@@ -827,7 +862,12 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 self.send(build_response(msg, 404, "Not Found"), addr)
                 return
             self.send(build_response(msg, 100, "Trying"), addr)
-            relay = await self.relay.allocate(call_id)
+            try:
+                relay = await self.relay.allocate(call_id)
+            except RuntimeError as e:
+                logger.warning("RTP relay allocate failed: %s", e)
+                self.send(build_response(msg, 486, "Busy Here"), addr)
+                return
             dlg = Dialog(call_id=call_id, caller_user=from_user, callee_user=to_user,
                          caller_addr=addr, relay=relay)
             self.dialogs[call_id] = dlg
@@ -848,8 +888,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                               else dlg.relay.a_rtp_port)
                 leg = "A" if addr == dlg.caller_addr else "B"
                 new_body, info = rewrite_sdp(msg.body, settings.public_host, relay_port)
-                if info.media_ip and info.media_port:
-                    self.relay.hint_remote(call_id, leg, (info.media_ip, info.media_port))
+                hint = _pick_hint_remote(info.media_ip, info.media_port, addr)
+                if hint:
+                    self.relay.hint_remote(call_id, leg, hint)
                 msg.body = new_body
                 replace_header(msg, "content-length", str(len(new_body)))
 

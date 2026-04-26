@@ -28,6 +28,7 @@ vim .env
 
 关键配置项：
 - `PUBLIC_HOST` 设为 ECS 公网 IP 或绑定的域名
+- 无音频排障可启用：`RTP_STICKY_MODE=true`、`RTP_STICKY_PORT=20000`
 - `JWT_SECRET` 改成长随机串：`openssl rand -hex 32`
 - `ADMIN_DEFAULT_PASS` 改强密码
 - `SIP_REALM` 设为你的域名

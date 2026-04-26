@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 venv/
 .env
+sip_test
 
 # 数据 / 媒体
 sip.db

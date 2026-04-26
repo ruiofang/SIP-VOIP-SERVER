@@ -71,6 +71,13 @@ MODE=run bash deploy/install_server.sh
 `SIP_PORT / API_PORT / RTP_MIN / RTP_MAX / DATABASE_URL / JWT_SECRET /
 ADMIN_DEFAULT_PASS`。
 
+无音频排障时可启用“贴近 sip_test 的兜底模式”（固定 RTP 端口，单路并发）：
+
+```bash
+RTP_STICKY_MODE=true
+RTP_STICKY_PORT=20000
+```
+
 PC 客户端：
 
 ```bash
@@ -94,6 +101,9 @@ python main.py
 - `5060/udp` — SIP
 - `8000/tcp` — 管理后台 + 语音上传 HTTP API
 - `20000-20199/udp` — RTP 媒体中继（可在 `.env` 中调整）
+
+若开启 `RTP_STICKY_MODE=true`，还需确认 `RTP_STICKY_PORT` 与 `RTP_STICKY_PORT+1`
+及 `+2/+3` 四个 UDP 端口放行。
 
 打开浏览器访问 `http://<host>:8000/ui/` 进入 Web 管理界面。
 

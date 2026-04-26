@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     # RTP 媒体中继
     rtp_port_min: int = 20000
     rtp_port_max: int = 20199
+    rtp_sticky_mode: bool = False
+    rtp_sticky_port: int = 20000
 
     # 数据库
     database_url: str = "sqlite+aiosqlite:///./sip.db"
