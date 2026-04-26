@@ -1,0 +1,59 @@
+version: "3.9"
+
+services:
+  sip:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: sip-voip-server:latest
+    container_name: sip-voip-server
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      # 容器内监听
+      SIP_HOST: 0.0.0.0
+      API_HOST: 0.0.0.0
+      # 如果使用 compose 内置 mysql：
+      # DATABASE_URL: mysql+aiomysql://sip:sippass@mysql:3306/sip
+    ports:
+      - "5060:5060/udp"
+      - "8000:8000/tcp"
+      # RTP 媒体中继端口段（与 .env 的 RTP_PORT_MIN/MAX 一致）
+      - "20000-20199:20000-20199/udp"
+    volumes:
+      - sip_voice:/app/voice_storage
+      - sip_data:/app/data
+    depends_on:
+      - mysql
+
+  mysql:
+    image: mysql:8.0
+    container_name: sip-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: sip
+      MYSQL_USER: sip
+      MYSQL_PASSWORD: sippass
+    volumes:
+      - mysql_data:/var/lib/mysql
+    # 阿里云生产环境强烈建议直接使用 RDS，移除本服务并把
+    # DATABASE_URL 指向 RDS 实例
+
+  nginx:
+    image: nginx:alpine
+    container_name: sip-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # - "443:443"     # 上 HTTPS 时打开
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - sip
+
+volumes:
+  sip_voice:
+  sip_data:
+  mysql_data:

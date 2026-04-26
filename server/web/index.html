@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SIP-VOIP-SERVER 管理后台</title>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  [x-cloak] { display: none !important; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .badge { @apply inline-block px-2 py-0.5 text-xs rounded; }
+</style>
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-800">
+<div x-data="app()" x-init="init()" x-cloak>
+
+  <!-- 登录 -->
+  <template x-if="!token">
+    <div class="min-h-screen flex items-center justify-center">
+      <form @submit.prevent="login" class="bg-white rounded-xl shadow-lg p-8 w-full max-w-sm space-y-4">
+        <h1 class="text-2xl font-bold text-slate-700 text-center">SIP-VOIP-SERVER</h1>
+        <p class="text-center text-slate-500 text-sm">管理员登录</p>
+        <input x-model="loginForm.username" placeholder="用户名" class="w-full border rounded px-3 py-2"
+               required autofocus />
+        <input x-model="loginForm.password" type="password" placeholder="密码"
+               class="w-full border rounded px-3 py-2" required />
+        <button class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">登录</button>
+        <p x-show="error" x-text="error" class="text-red-500 text-sm text-center"></p>
+      </form>
+    </div>
+  </template>
+
+  <!-- 主界面 -->
+  <template x-if="token">
+    <div>
+      <!-- 顶部导航 -->
+      <nav class="bg-slate-800 text-slate-100 px-6 py-3 flex items-center justify-between shadow">
+        <div class="flex items-center gap-6">
+          <span class="font-bold text-lg">SIP-VOIP-SERVER</span>
+          <template x-for="t in tabs" :key="t.id">
+            <button @click="tab = t.id"
+                    :class="tab===t.id ? 'text-white border-b-2 border-blue-400' : 'text-slate-300 hover:text-white'"
+                    class="pb-1 transition" x-text="t.name"></button>
+          </template>
+        </div>
+        <div class="flex items-center gap-4 text-sm">
+          <span class="text-slate-400">v1.0</span>
+          <button @click="changePwOpen = true" class="hover:text-blue-300">修改密码</button>
+          <button @click="logout" class="hover:text-red-400">退出</button>
+        </div>
+      </nav>
+
+      <main class="p-6 max-w-7xl mx-auto space-y-6">
+
+        <!-- 设备账号 -->
+        <section x-show="tab==='accounts'">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-xl font-semibold">SIP 设备账号</h2>
+            <div class="flex gap-2">
+              <button @click="loadAccounts" class="px-3 py-1 bg-slate-200 rounded">刷新</button>
+              <button @click="newAccountOpen = true" class="px-3 py-1 bg-blue-600 text-white rounded">+ 新建</button>
+            </div>
+          </div>
+          <div class="bg-white shadow rounded overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500">
+                <tr>
+                  <th class="text-left px-4 py-2">用户名</th>
+                  <th class="text-left px-4 py-2">显示名</th>
+                  <th class="text-left px-4 py-2">状态</th>
+                  <th class="text-left px-4 py-2">在线</th>
+                  <th class="text-left px-4 py-2">Contact</th>
+                  <th class="text-left px-4 py-2">创建时间</th>
+                  <th class="px-4 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="a in accounts" :key="a.id">
+                  <tr class="border-t hover:bg-slate-50">
+                    <td class="px-4 py-2 font-mono" x-text="a.username"></td>
+                    <td class="px-4 py-2" x-text="a.display_name || '-'"></td>
+                    <td class="px-4 py-2">
+                      <span :class="a.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-500'"
+                            class="px-2 py-0.5 text-xs rounded"
+                            x-text="a.enabled ? '启用' : '禁用'"></span>
+                    </td>
+                    <td class="px-4 py-2">
+                      <span :class="a.online ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'"
+                            class="px-2 py-0.5 text-xs rounded"
+                            x-text="a.online ? '在线' : '离线'"></span>
+                    </td>
+                    <td class="px-4 py-2 text-xs text-slate-500" x-text="a.contact_uri || '-'"></td>
+                    <td class="px-4 py-2 text-xs text-slate-500" x-text="fmt(a.created_at)"></td>
+                    <td class="px-4 py-2 text-right space-x-2">
+                      <button @click="editAccount(a)" class="text-blue-600 hover:underline">编辑</button>
+                      <button @click="deleteAccount(a)" class="text-red-600 hover:underline">删除</button>
+                    </td>
+                  </tr>
+                </template>
+                <tr x-show="!accounts.length">
+                  <td colspan="7" class="text-center text-slate-400 py-8">暂无账号</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 实时通话 -->
+        <section x-show="tab==='calls'">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-xl font-semibold">实时通话</h2>
+            <div class="flex items-center gap-3">
+              <label class="text-sm text-slate-500 flex items-center gap-1">
+                <input type="checkbox" x-model="autoRefresh" />自动刷新 3s
+              </label>
+              <button @click="loadCalls" class="px-3 py-1 bg-slate-200 rounded">刷新</button>
+            </div>
+          </div>
+          <div class="bg-white shadow rounded overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500">
+                <tr>
+                  <th class="text-left px-4 py-2">Call-ID</th>
+                  <th class="text-left px-4 py-2">主叫</th>
+                  <th class="text-left px-4 py-2">被叫</th>
+                  <th class="text-left px-4 py-2">状态</th>
+                  <th class="text-left px-4 py-2">时长</th>
+                  <th class="text-left px-4 py-2">中继 A/B 端口</th>
+                  <th class="text-left px-4 py-2">流量(in/out)</th>
+                  <th class="px-4 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="c in calls" :key="c.call_id">
+                  <tr class="border-t hover:bg-slate-50">
+                    <td class="px-4 py-2 text-xs font-mono text-slate-500" x-text="c.call_id.slice(0,16)+'…'"></td>
+                    <td class="px-4 py-2"><span class="font-mono" x-text="c.caller"></span><br><span class="text-xs text-slate-400" x-text="c.caller_addr"></span></td>
+                    <td class="px-4 py-2"><span class="font-mono" x-text="c.callee"></span><br><span class="text-xs text-slate-400" x-text="c.callee_addr || '-'"></span></td>
+                    <td class="px-4 py-2">
+                      <span :class="c.confirmed ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'"
+                            class="px-2 py-0.5 text-xs rounded"
+                            x-text="c.confirmed ? '通话中' : '振铃中'"></span>
+                    </td>
+                    <td class="px-4 py-2" x-text="c.duration + 's'"></td>
+                    <td class="px-4 py-2 text-xs text-slate-500">
+                      <span x-text="c.relay?.leg_a?.port || '-'"></span> / <span x-text="c.relay?.leg_b?.port || '-'"></span>
+                    </td>
+                    <td class="px-4 py-2 text-xs text-slate-500">
+                      A: <span x-text="kb(c.relay?.leg_a?.bytes_in)"></span> / <span x-text="kb(c.relay?.leg_a?.bytes_out)"></span><br>
+                      B: <span x-text="kb(c.relay?.leg_b?.bytes_in)"></span> / <span x-text="kb(c.relay?.leg_b?.bytes_out)"></span>
+                    </td>
+                    <td class="px-4 py-2 text-right">
+                      <button @click="hangup(c.call_id)" class="text-red-600 hover:underline">挂断</button>
+                    </td>
+                  </tr>
+                </template>
+                <tr x-show="!calls.length">
+                  <td colspan="8" class="text-center text-slate-400 py-8">当前无通话</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 消息历史 -->
+        <section x-show="tab==='messages'">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-xl font-semibold">消息历史</h2>
+            <div class="flex gap-2">
+              <input x-model="msgFilter" placeholder="按用户名过滤"
+                     class="border px-3 py-1 rounded text-sm" />
+              <button @click="loadMessages" class="px-3 py-1 bg-slate-200 rounded">刷新</button>
+              <button @click="sendMsgOpen = true" class="px-3 py-1 bg-blue-600 text-white rounded">发送消息</button>
+            </div>
+          </div>
+          <div class="bg-white shadow rounded overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500">
+                <tr>
+                  <th class="text-left px-4 py-2">时间</th>
+                  <th class="text-left px-4 py-2">类型</th>
+                  <th class="text-left px-4 py-2">From</th>
+                  <th class="text-left px-4 py-2">To</th>
+                  <th class="text-left px-4 py-2">内容</th>
+                  <th class="text-left px-4 py-2">已送达</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="m in messages" :key="m.id">
+                  <tr class="border-t hover:bg-slate-50">
+                    <td class="px-4 py-2 text-xs text-slate-500" x-text="fmt(m.created_at)"></td>
+                    <td class="px-4 py-2">
+                      <span :class="m.msg_type==='voice' ? 'bg-purple-100 text-purple-700' : 'bg-slate-200 text-slate-700'"
+                            class="px-2 py-0.5 text-xs rounded"
+                            x-text="m.msg_type"></span>
+                    </td>
+                    <td class="px-4 py-2 font-mono" x-text="m.from_user"></td>
+                    <td class="px-4 py-2 font-mono" x-text="m.to_user"></td>
+                    <td class="px-4 py-2 max-w-md break-all">
+                      <template x-if="m.msg_type === 'voice'">
+                        <a :href="m.body" target="_blank" class="text-blue-600 hover:underline">▶ 语音 <span x-text="m.body.split('/').pop()"></span></a>
+                      </template>
+                      <template x-if="m.msg_type !== 'voice'">
+                        <span x-text="m.body"></span>
+                      </template>
+                    </td>
+                    <td class="px-4 py-2">
+                      <span :class="m.delivered ? 'text-green-600' : 'text-yellow-600'"
+                            x-text="m.delivered ? '✓' : '…待送达'"></span>
+                    </td>
+                  </tr>
+                </template>
+                <tr x-show="!messages.length">
+                  <td colspan="6" class="text-center text-slate-400 py-8">暂无消息</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+      </main>
+
+      <!-- 模态：新建/编辑账号 -->
+      <div x-show="newAccountOpen || editingAccount" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <form @submit.prevent="submitAccount" class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md space-y-3">
+          <h3 class="text-lg font-semibold" x-text="editingAccount ? '编辑账号' : '新建 SIP 账号'"></h3>
+          <input x-model="accountForm.username" :disabled="editingAccount" placeholder="用户名（如 esp001）"
+                 class="w-full border rounded px-3 py-2 disabled:bg-slate-100" required />
+          <input x-model="accountForm.password" type="password"
+                 :placeholder="editingAccount ? '留空则不修改密码' : '密码'"
+                 class="w-full border rounded px-3 py-2" :required="!editingAccount" />
+          <input x-model="accountForm.display_name" placeholder="显示名（可选）"
+                 class="w-full border rounded px-3 py-2" />
+          <input x-model="accountForm.description" placeholder="备注（可选）"
+                 class="w-full border rounded px-3 py-2" />
+          <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" x-model="accountForm.enabled" />启用
+          </label>
+          <div class="flex justify-end gap-2 pt-2">
+            <button type="button" @click="cancelAccount" class="px-4 py-1 rounded border">取消</button>
+            <button class="px-4 py-1 rounded bg-blue-600 text-white">保存</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- 模态：发送消息 -->
+      <div x-show="sendMsgOpen" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <form @submit.prevent="submitMessage" class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md space-y-3">
+          <h3 class="text-lg font-semibold">发送消息 / 语音</h3>
+          <select x-model="msgForm.msg_type" class="w-full border rounded px-3 py-2">
+            <option value="text">文本短信</option>
+            <option value="voice">语音文件（上传）</option>
+          </select>
+          <input x-model="msgForm.from_user" placeholder="发件人（admin-bot）"
+                 class="w-full border rounded px-3 py-2" required />
+          <input x-model="msgForm.to_user" placeholder="收件人 SIP 用户名"
+                 class="w-full border rounded px-3 py-2" required />
+          <template x-if="msgForm.msg_type === 'text'">
+            <textarea x-model="msgForm.body" placeholder="消息正文" rows="3"
+                      class="w-full border rounded px-3 py-2" required></textarea>
+          </template>
+          <template x-if="msgForm.msg_type === 'voice'">
+            <input type="file" @change="msgForm.file = $event.target.files[0]" accept="audio/*"
+                   class="w-full" required />
+          </template>
+          <div class="flex justify-end gap-2 pt-2">
+            <button type="button" @click="sendMsgOpen = false" class="px-4 py-1 rounded border">取消</button>
+            <button class="px-4 py-1 rounded bg-blue-600 text-white">发送</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- 模态：修改密码 -->
+      <div x-show="changePwOpen" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <form @submit.prevent="changePassword" class="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm space-y-3">
+          <h3 class="text-lg font-semibold">修改管理员密码</h3>
+          <input x-model="pwForm.old_password" type="password" placeholder="原密码"
+                 class="w-full border rounded px-3 py-2" required />
+          <input x-model="pwForm.new_password" type="password" placeholder="新密码"
+                 class="w-full border rounded px-3 py-2" required />
+          <div class="flex justify-end gap-2 pt-2">
+            <button type="button" @click="changePwOpen = false" class="px-4 py-1 rounded border">取消</button>
+            <button class="px-4 py-1 rounded bg-blue-600 text-white">提交</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- toast -->
+      <div x-show="toast" x-transition
+           class="fixed top-4 right-4 bg-slate-800 text-white px-4 py-2 rounded shadow z-50"
+           x-text="toast"></div>
+    </div>
+  </template>
+</div>
+
+<script>
+function app() {
+  return {
+    token: localStorage.getItem('token') || '',
+    tab: 'accounts',
+    tabs: [
+      { id: 'accounts', name: '设备账号' },
+      { id: 'calls',    name: '实时通话' },
+      { id: 'messages', name: '消息历史' },
+    ],
+    loginForm: { username: '', password: '' },
+    error: '',
+    accounts: [],
+    calls: [],
+    messages: [],
+    msgFilter: '',
+    autoRefresh: true,
+    _timer: null,
+    newAccountOpen: false,
+    editingAccount: null,
+    accountForm: { username: '', password: '', display_name: '', description: '', enabled: true },
+    sendMsgOpen: false,
+    msgForm: { msg_type: 'text', from_user: 'admin-bot', to_user: '', body: '', file: null },
+    changePwOpen: false,
+    pwForm: { old_password: '', new_password: '' },
+    toast: '',
+
+    async init() {
+      if (this.token) await this.loadAll();
+      this.$watch('tab', () => this.loadAll());
+      this.$watch('autoRefresh', v => v ? this.startTimer() : this.stopTimer());
+      if (this.autoRefresh) this.startTimer();
+    },
+    startTimer() {
+      this.stopTimer();
+      this._timer = setInterval(() => {
+        if (this.tab === 'calls') this.loadCalls();
+      }, 3000);
+    },
+    stopTimer() { if (this._timer) clearInterval(this._timer); this._timer = null; },
+    showToast(msg) { this.toast = msg; setTimeout(() => this.toast = '', 2200); },
+    fmt(s) { if (!s) return ''; return new Date(s).toLocaleString('zh-CN'); },
+    kb(b) { if (!b) return '0B'; if (b < 1024) return b+'B'; if (b < 1048576) return (b/1024).toFixed(1)+'K'; return (b/1048576).toFixed(2)+'M'; },
+
+    async api(path, opts = {}) {
+      opts.headers = Object.assign({ 'Authorization': 'Bearer ' + this.token }, opts.headers || {});
+      const r = await fetch(path, opts);
+      if (r.status === 401) { this.logout(); throw new Error('未授权'); }
+      if (!r.ok) {
+        let msg = r.statusText;
+        try { msg = (await r.json()).detail || msg; } catch {}
+        throw new Error(msg);
+      }
+      const ct = r.headers.get('content-type') || '';
+      return ct.includes('json') ? r.json() : r.text();
+    },
+
+    async login() {
+      this.error = '';
+      try {
+        const body = new URLSearchParams();
+        body.append('username', this.loginForm.username);
+        body.append('password', this.loginForm.password);
+        const r = await fetch('/api/auth/login', { method: 'POST', body });
+        if (!r.ok) throw new Error('用户名或密码错误');
+        const j = await r.json();
+        this.token = j.access_token;
+        localStorage.setItem('token', this.token);
+        await this.loadAll();
+        this.startTimer();
+      } catch (e) { this.error = e.message; }
+    },
+    logout() {
+      this.token = '';
+      localStorage.removeItem('token');
+      this.stopTimer();
+    },
+
+    async loadAll() {
+      if (this.tab === 'accounts') await this.loadAccounts();
+      if (this.tab === 'calls')    await this.loadCalls();
+      if (this.tab === 'messages') await this.loadMessages();
+    },
+    async loadAccounts() {
+      try { this.accounts = await this.api('/api/accounts'); }
+      catch (e) { this.showToast(e.message); }
+    },
+    async loadCalls() {
+      try { this.calls = await this.api('/api/calls'); }
+      catch (e) {}
+    },
+    async loadMessages() {
+      try {
+        const q = this.msgFilter ? '?user=' + encodeURIComponent(this.msgFilter) : '';
+        this.messages = await this.api('/api/messages' + q);
+      } catch (e) { this.showToast(e.message); }
+    },
+
+    editAccount(a) {
+      this.editingAccount = a;
+      this.accountForm = {
+        username: a.username, password: '',
+        display_name: a.display_name || '', description: a.description || '',
+        enabled: a.enabled,
+      };
+    },
+    cancelAccount() {
+      this.newAccountOpen = false;
+      this.editingAccount = null;
+      this.accountForm = { username: '', password: '', display_name: '', description: '', enabled: true };
+    },
+    async submitAccount() {
+      try {
+        if (this.editingAccount) {
+          const body = {};
+          if (this.accountForm.password)  body.password = this.accountForm.password;
+          body.display_name = this.accountForm.display_name;
+          body.description  = this.accountForm.description;
+          body.enabled      = this.accountForm.enabled;
+          await this.api('/api/accounts/' + this.editingAccount.username, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+        } else {
+          await this.api('/api/accounts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(this.accountForm),
+          });
+        }
+        this.cancelAccount();
+        this.showToast('已保存');
+        this.loadAccounts();
+      } catch (e) { this.showToast(e.message); }
+    },
+    async deleteAccount(a) {
+      if (!confirm('确定删除账号 ' + a.username + ' ?')) return;
+      try {
+        await this.api('/api/accounts/' + a.username, { method: 'DELETE' });
+        this.showToast('已删除');
+        this.loadAccounts();
+      } catch (e) { this.showToast(e.message); }
+    },
+    async hangup(call_id) {
+      if (!confirm('强制挂断这通通话?')) return;
+      try {
+        await this.api('/api/calls/' + call_id + '/hangup', { method: 'POST' });
+        this.showToast('已挂断');
+        this.loadCalls();
+      } catch (e) { this.showToast(e.message); }
+    },
+    async submitMessage() {
+      try {
+        if (this.msgForm.msg_type === 'text') {
+          await this.api('/api/send_message', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              from_user: this.msgForm.from_user,
+              to_user:   this.msgForm.to_user,
+              body:      this.msgForm.body,
+              msg_type:  'text',
+            }),
+          });
+        } else {
+          const fd = new FormData();
+          fd.append('owner', this.msgForm.from_user);
+          fd.append('to_user', this.msgForm.to_user);
+          fd.append('file', this.msgForm.file);
+          await this.api('/api/voice/upload', { method: 'POST', body: fd });
+        }
+        this.sendMsgOpen = false;
+        this.msgForm = { msg_type: 'text', from_user: 'admin-bot', to_user: '', body: '', file: null };
+        this.showToast('已发送');
+        this.loadMessages();
+      } catch (e) { this.showToast(e.message); }
+    },
+    async changePassword() {
+      try {
+        const fd = new FormData();
+        fd.append('old_password', this.pwForm.old_password);
+        fd.append('new_password', this.pwForm.new_password);
+        await this.api('/api/auth/change_password', { method: 'POST', body: fd });
+        this.changePwOpen = false;
+        this.pwForm = { old_password: '', new_password: '' };
+        this.showToast('密码已修改');
+      } catch (e) { this.showToast(e.message); }
+    },
+  };
+}
+</script>
+</body>
+</html>

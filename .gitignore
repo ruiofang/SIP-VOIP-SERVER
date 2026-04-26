@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# 数据 / 媒体
+sip.db
+sip.db-journal
+voice_storage/
+data/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 部署
+deploy/certs/
