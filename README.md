@@ -47,6 +47,37 @@
 └── README.md
 ```
 
+## 一键部署 / 启动
+
+服务端（裸机 / VPS / 阿里云 ECS）：
+
+```bash
+# systemd 模式（推荐生产）
+sudo PUBLIC_HOST=your.public.ip MODE=systemd bash deploy/install_server.sh
+
+# Docker Compose 模式
+MODE=docker bash deploy/install_server.sh
+
+# 前台调试模式
+MODE=run bash deploy/install_server.sh
+```
+
+脚本会自动建 venv、装依赖（含 `bcrypt<4.1` 兼容修复）、生成 `.env`（随机
+`JWT_SECRET`），并注册 systemd 服务；Docker 模式直接调用
+[deploy/docker-compose.yml](deploy/docker-compose.yml)。常用环境变量：
+`SIP_PORT / API_PORT / RTP_MIN / RTP_MAX / DATABASE_URL / JWT_SECRET /
+ADMIN_DEFAULT_PASS`。
+
+PC 客户端：
+
+```bash
+SERVER=1.2.3.4 USER=1001 PASSWORD=secret123 \
+  API_BASE=http://1.2.3.4:8000 \
+  bash client_pc/run_client.sh
+```
+
+不带变量则脚本交互问询；自动建 venv 并安装 [client_pc/requirements.txt](client_pc/requirements.txt)。
+
 ## 快速开始（本地）
 
 ```bash
