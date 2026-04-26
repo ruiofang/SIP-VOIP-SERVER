@@ -19,10 +19,17 @@ PYBIN="${PYBIN:-python3}"
 command -v "$PYBIN" >/dev/null || { echo "需要 python3"; exit 1; }
 
 VENV="$HERE/.venv"
-if [[ ! -d "$VENV" ]]; then
-  echo "[*] 创建 venv -> $VENV"
-  "$PYBIN" -m venv "$VENV"
-fi
+ensure_venv() {
+  if [[ -x "$VENV/bin/pip" ]]; then return 0; fi
+  echo "[*] 创建/修复 venv -> $VENV"
+  rm -rf "$VENV"
+  if ! "$PYBIN" -m venv "$VENV" 2>/tmp/venv_err; then
+    cat /tmp/venv_err
+    echo "[!] 请先安装: sudo apt-get install -y python3-venv python3-pip"; exit 1
+  fi
+  [[ -x "$VENV/bin/pip" ]] || "$VENV/bin/python" -m ensurepip --upgrade
+}
+ensure_venv
 "$VENV/bin/pip" install --upgrade pip wheel >/dev/null
 "$VENV/bin/pip" install -r "$HERE/requirements.txt"
 

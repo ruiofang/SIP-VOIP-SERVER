@@ -83,10 +83,27 @@ fi
 PYBIN="${PYBIN:-python3}"
 command -v "$PYBIN" >/dev/null || { echo "需要 python3"; exit 1; }
 VENV="$APP_DIR/.venv"
-if [[ ! -d "$VENV" ]]; then
-  echo "[*] 创建 venv -> $VENV"
-  "$PYBIN" -m venv "$VENV"
-fi
+# 部分发行版 (Debian/Ubuntu) 默认 venv 不带 pip, 这里检测并尝试修复
+ensure_venv() {
+  if [[ -x "$VENV/bin/pip" ]]; then return 0; fi
+  echo "[*] 创建/修复 venv -> $VENV"
+  rm -rf "$VENV"
+  if ! "$PYBIN" -m venv "$VENV" 2>/tmp/venv_err; then
+    cat /tmp/venv_err
+    if grep -q ensurepip /tmp/venv_err && command -v apt-get >/dev/null; then
+      echo "[*] 安装 python3-venv"
+      apt-get update -y && apt-get install -y python3-venv python3-pip
+      "$PYBIN" -m venv "$VENV"
+    else
+      exit 1
+    fi
+  fi
+  if [[ ! -x "$VENV/bin/pip" ]]; then
+    "$VENV/bin/python" -m ensurepip --upgrade || {
+      echo "[!] venv 缺少 pip, 请先: apt-get install -y python3-venv python3-pip"; exit 1; }
+  fi
+}
+ensure_venv
 "$VENV/bin/pip" install --upgrade pip wheel >/dev/null
 "$VENV/bin/pip" install -r "$APP_DIR/server/requirements.txt"
 # passlib 与 bcrypt>=4.1 不兼容 (会抛 'password cannot be longer than 72 bytes')
