@@ -428,6 +428,22 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                          if not d.confirmed and now - d.created_at > 60]
                 for c in stale:
                     await self._end_dialog(c)
+                # 兜底：已确认对话若 RTP 长时间无流量（双方均无收包），
+                # 视为对端异常掉线/BYE 信令丢失，直接清理。
+                idle_kill = []
+                for c, d in self.dialogs.items():
+                    if not d.confirmed or not d.relay:
+                        continue
+                    relay = self.relay.get(c)
+                    if not relay:
+                        continue
+                    last = max(relay.leg_a.last_recv_ts, relay.leg_b.last_recv_ts)
+                    ref = last if last > 0 else d.created_at
+                    if now - ref > 120:
+                        idle_kill.append((c, now - ref))
+                for c, idle in idle_kill:
+                    logger.info("Stale dialog GC: call_id=%s idle=%.0fs", c, idle)
+                    await self._end_dialog(c)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -928,6 +944,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         call_id = msg.header("call-id") or ""
         dlg = self.dialogs.get(call_id)
         if not dlg:
+            # BYE 找不到对话直接 200 OK，避免某些 UA 反复重发
+            if msg.method == "BYE":
+                self.send(build_response(msg, 200, "OK"), addr)
+                return
             self.send(build_response(msg, 481, "Call/Transaction Does Not Exist"), addr)
             return
         if addr == dlg.caller_addr:
@@ -937,10 +957,19 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         else:
             target = dlg.callee_addr or dlg.caller_addr
         if not target:
+            # 没有对端可路由：BYE 直接本地 200 OK 并清理
+            if msg.method == "BYE":
+                self.send(build_response(msg, 200, "OK"), addr)
+                await self._end_dialog(call_id)
+                return
             self.send(build_response(msg, 500, "No Route"), addr)
             return
         self._rewrite_contact(msg)
         await self._forward_request(msg, addr, target)
+        # 任意一方发 BYE 即代表通话结束，立刻释放本侧资源；
+        # 对端 200 OK 的反向路由依赖 transactions 表，与 dialogs 解耦，仍可正常返回给挂机方。
+        if msg.method == "BYE":
+            await self._end_dialog(call_id)
 
     # ============== 转发请求 ==============
     async def _forward_request(self, msg: SipMessage, origin: Address, target: Address) -> None:
