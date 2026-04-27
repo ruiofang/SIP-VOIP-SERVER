@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .env
 sip_test
+ruio-xiaozhi-esp32-2.0.5
 
 # 数据 / 媒体
 sip.db
