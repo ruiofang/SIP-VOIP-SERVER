@@ -376,6 +376,10 @@ class Dialog:
     created_at: float = field(default_factory=time.time)
     confirmed: bool = False
     ended: bool = False
+    # 用于 B2BUA 处理 CANCEL：转发出去 INVITE 时压入的 top-Via branch；以及
+    # 主叫原始 INVITE 报文（若呼叫尚未 200 应答，需要本地回 487 给主叫）。
+    invite_branch_out: Optional[str] = None
+    caller_invite_msg: Optional["SipMessage"] = None
 
 
 # ============== 主协议 ==============
@@ -900,6 +904,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 return
             dlg = Dialog(call_id=call_id, caller_user=from_user, callee_user=to_user,
                          caller_addr=addr, relay=relay)
+            # 保存一份主叫 INVITE 的副本，用于后续 CANCEL 时本地构造 487 应答。
+            dlg.caller_invite_msg = parse_sip(msg.raw)
             self.dialogs[call_id] = dlg
             target = rec.source
         else:
@@ -925,7 +931,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 replace_header(msg, "content-length", str(len(new_body)))
 
         self._rewrite_contact(msg)
-        await self._forward_request(msg, addr, target)
+        branch = await self._forward_request(msg, addr, target)
+        if not is_reinvite:
+            dlg.invite_branch_out = branch
 
     async def _handle_ack(self, msg: SipMessage, addr: Address) -> None:
         call_id = msg.header("call-id") or ""
@@ -944,12 +952,22 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         call_id = msg.header("call-id") or ""
         dlg = self.dialogs.get(call_id)
         if not dlg:
-            # BYE 找不到对话直接 200 OK，避免某些 UA 反复重发
-            if msg.method == "BYE":
+            # BYE/CANCEL 找不到对话直接 200 OK，避免某些 UA 反复重发
+            if msg.method in ("BYE", "CANCEL"):
                 self.send(build_response(msg, 200, "OK"), addr)
                 return
             self.send(build_response(msg, 481, "Call/Transaction Does Not Exist"), addr)
             return
+
+        # ============== CANCEL：B2BUA 自处理 ==============
+        # CANCEL 必须沿用与 INVITE 相同的 top-Via branch（RFC 3261 §9.1），
+        # 直接走 _forward_request 会生成新 branch，被叫无法匹配 → 振铃永远卡住。
+        # 这里改为：本地立刻 200/CANCEL，向主叫回 487/INVITE，再用保存的
+        # outbound INVITE branch 把 CANCEL 推给被叫，最后立即结束对话。
+        if msg.method == "CANCEL":
+            await self._handle_cancel(msg, addr, dlg)
+            return
+
         if addr == dlg.caller_addr:
             target = dlg.callee_addr
         elif dlg.callee_addr and addr == dlg.callee_addr:
@@ -971,8 +989,39 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if msg.method == "BYE":
             await self._end_dialog(call_id)
 
+    async def _handle_cancel(self, msg: SipMessage, addr: Address, dlg: Dialog) -> None:
+        """B2BUA 处理 CANCEL：本地终结主叫事务并向被叫转发取消。"""
+        # 1. 立刻 200 OK 应答主叫的 CANCEL 事务
+        self.send(build_response(msg, 200, "OK"), addr)
+
+        # 2. 主叫尚未收到 200/INVITE 时，本地回 487 终结其 INVITE 事务
+        if dlg.caller_invite_msg is not None and not dlg.confirmed:
+            invite = dlg.caller_invite_msg
+            to_h = invite.header("to") or ""
+            if "tag=" not in to_h:
+                replace_header(invite, "to", f"{to_h};tag={secrets.token_hex(6)}")
+            self.send(build_response(invite, 487, "Request Terminated"), dlg.caller_addr)
+
+        # 3. 用与 INVITE 相同的 branch 把 CANCEL 推给被叫；不再跟踪其响应
+        if dlg.callee_addr and dlg.invite_branch_out:
+            host, port = settings.public_host, settings.public_sip_port
+            prepend_header(msg, "Via",
+                           f"SIP/2.0/UDP {host}:{port};branch={dlg.invite_branch_out};rport")
+            mf = msg.header("max-forwards")
+            if mf and mf.isdigit():
+                replace_header(msg, "max-forwards", str(max(0, int(mf) - 1)))
+            else:
+                replace_header(msg, "max-forwards", "70")
+            self._rewrite_contact(msg)
+            self.send(serialize(msg), dlg.callee_addr)
+
+        # 4. 释放对话与中继资源；UI 立即不再显示"振铃中"
+        logger.info("CANCEL accepted: call_id=%s caller=%s callee=%s",
+                    dlg.call_id, dlg.caller_user, dlg.callee_user)
+        await self._end_dialog(dlg.call_id)
+
     # ============== 转发请求 ==============
-    async def _forward_request(self, msg: SipMessage, origin: Address, target: Address) -> None:
+    async def _forward_request(self, msg: SipMessage, origin: Address, target: Address) -> str:
         branch = "z9hG4bK" + secrets.token_hex(8)
         self._push_top_via(msg, branch)
         mf = msg.header("max-forwards")
@@ -987,6 +1036,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 branch=branch, method=msg.method or "", origin_addr=origin,
                 forwarded_to=target, call_id=call_id)
         self.send(serialize(msg), target)
+        return branch
 
     def _push_top_via(self, msg: SipMessage, branch: str) -> None:
         host, port = settings.public_host, settings.public_sip_port
@@ -1005,6 +1055,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if dlg and not dlg.ended:
             dlg.ended = True
             await self.relay.release(call_id)
+        # 同步清理与该对话关联的待响应事务，避免被叫迟到的 487/180 等
+        # 反向回送到已挂机的主叫。
+        for b in [b for b, t in self.transactions.items() if t.call_id == call_id]:
+            self.transactions.pop(b, None)
 
     # ============== Auth helper ==============
     async def _require_auth(self, msg: SipMessage, addr: Address, username: str, *,
